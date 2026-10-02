@@ -29,3 +29,5 @@ Thumbs.db
 data/
 *.db
 *.trace.db
+backups/
+*.sql
