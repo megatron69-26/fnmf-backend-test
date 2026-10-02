@@ -30,4 +30,3 @@ data/
 *.db
 *.trace.db
 backups/
-*.sql
