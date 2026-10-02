@@ -9,8 +9,14 @@ target/
 .classpath
 .settings/
 
-# Environment
+# Environment & Test Secrets
 .env
+.env.*
+!.env.example
+!.env.test.example
+*.env
+application-*-local.properties
+application-local.properties
 
 # OS
 .DS_Store
