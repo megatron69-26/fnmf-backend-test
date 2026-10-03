@@ -4,6 +4,7 @@ import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.SignatureAlgorithm;
 import io.jsonwebtoken.security.Keys;
+import jakarta.annotation.PostConstruct;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -14,13 +15,33 @@ import java.util.Date;
 @Component
 public class JwtUtil {
 
-    @Value("${jwt.secret:fnmf_secret_key_jwt_2026_super_secure_key_for_mobile_banking_app_khoid}")
+    @Value("${jwt.secret}")
     private String jwtSecret;
 
     @Value("${jwt.expiration-ms:86400000}")
-    private long jwtExpirationMs;
+    private long jwtExpirationMs = 86400000L;
+
+    public JwtUtil() {
+    }
+
+    public JwtUtil(String jwtSecret, long jwtExpirationMs) {
+        this.jwtSecret = jwtSecret;
+        this.jwtExpirationMs = jwtExpirationMs;
+        validateSecret();
+    }
+
+    @PostConstruct
+    public void validateSecret() {
+        if (jwtSecret == null || jwtSecret.trim().isEmpty()) {
+            throw new IllegalStateException("FAIL-CLOSED: jwt.secret is required and cannot be empty.");
+        }
+        if (jwtSecret.trim().length() < 32) {
+            throw new IllegalStateException("FAIL-CLOSED: jwt.secret must be at least 32 characters (256 bits) for HMAC-SHA256 security.");
+        }
+    }
 
     private Key getSigningKey() {
+        validateSecret();
         byte[] keyBytes = jwtSecret.getBytes(StandardCharsets.UTF_8);
         return Keys.hmacShaKeyFor(keyBytes);
     }

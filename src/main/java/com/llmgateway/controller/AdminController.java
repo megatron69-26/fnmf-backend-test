@@ -202,11 +202,11 @@ public class AdminController {
     }
 
     @PostMapping("/db/query")
-    @Profile({"dev", "local", "test"})
+    @Profile({"dev", "local"})
     public ResponseEntity<Map<String, Object>> executeDbQuery(@RequestHeader(value = "Authorization", required = false) String authHeader,
                                                               @RequestBody Map<String, String> body) {
-        if (env != null && Arrays.asList(env.getActiveProfiles()).contains("prod")) {
-            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint is strictly disabled in PROD environment.");
+        if (env != null && (Arrays.asList(env.getActiveProfiles()).contains("prod") || Arrays.asList(env.getActiveProfiles()).contains("test"))) {
+            throw new org.springframework.web.server.ResponseStatusException(HttpStatus.NOT_FOUND, "Endpoint is strictly disabled in PROD and TEST environments.");
         }
 
         AdminAuthResult auth = verifyAdmin(authHeader);
