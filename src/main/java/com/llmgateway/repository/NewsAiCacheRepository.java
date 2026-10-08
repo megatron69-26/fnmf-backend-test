@@ -21,4 +21,7 @@ public interface NewsAiCacheRepository extends JpaRepository<NewsAiCache, Long> 
     List<NewsAiCache> findTop50ByOrderByPublishedAtDesc();
 
     List<NewsAiCache> findBySymbolOrderByPublishedAtDesc(String symbol);
+
+    @org.springframework.data.jpa.repository.Query("SELECT n FROM NewsAiCache n WHERE n.reason = 'RAW_PENDING' OR n.reason LIKE 'QWEN_ERROR%' ORDER BY n.publishedAt DESC")
+    List<NewsAiCache> findPendingOrErrorArticles();
 }

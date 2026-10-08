@@ -78,7 +78,7 @@ public class MobileSyncController {
         }
 
         try {
-            // Bước 1: Lấy dữ liệu từ CSDL Cache qua NewsCacheService
+            // Bước 1: Lấy dữ liệu từ CSDL Cache qua NewsCacheService (Cache-only)
             List<NewsAiCache> cachedNews;
             if (symbol != null && !symbol.isBlank()) {
                 cachedNews = newsCacheService.findBySymbolOrderByPublishedAtDesc(symbol, limit);
@@ -86,22 +86,17 @@ public class MobileSyncController {
                 cachedNews = newsCacheService.findTopByOrderByPublishedAtDesc(limit);
             }
 
-            // Bước 2: Nếu cache rỗng, gọi pipeline live feed để nạp dữ liệu mới
-            if (cachedNews.isEmpty()) {
-                aiNewsService.getLiveAiNewsFeed(symbol, limit);
-                if (symbol != null && !symbol.isBlank()) {
-                    cachedNews = newsCacheService.findBySymbolOrderByPublishedAtDesc(symbol, limit);
-                } else {
-                    cachedNews = newsCacheService.findTopByOrderByPublishedAtDesc(limit);
-                }
-            }
-
-            // Bước 3: Nếu vẫn rỗng cho symbol cụ thể, fallback sang tin thị trường chung (MARKET)
+            // Bước 2: Nếu rỗng cho symbol cụ thể, fallback sang tin thị trường chung trong cache
             if (cachedNews.isEmpty()) {
                 cachedNews = newsCacheService.findTopByOrderByPublishedAtDesc(limit);
                 if (cachedNews.isEmpty()) {
                     cachedNews = newsCacheService.findAll(limit);
                 }
+            }
+
+            // Bước 3: Cache-only invariant: Kể cả khi cache rỗng, TUYỆT ĐỐI KHÔNG gọi LLM hoặc external provider
+            if (cachedNews.isEmpty()) {
+                return ResponseEntity.ok(List.of());
             }
 
             List<MobileNewsBundleResponse> result = cachedNews.stream()
@@ -210,9 +205,16 @@ public class MobileSyncController {
                 ? entity.getPublishedAt().toInstant(ZoneOffset.UTC).toEpochMilli()
                 : System.currentTimeMillis();
 
+        // Ưu tiên displayTitleVi nếu có; nếu Qwen lỗi hoặc chưa dịch, dùng tiêu đề gốc (fail-closed)
+        String effectiveTitle = (entity.getDisplayTitleVi() != null && !entity.getDisplayTitleVi().isBlank())
+                ? entity.getDisplayTitleVi().trim()
+                : ((entity.getOriginalTitle() != null && !entity.getOriginalTitle().isBlank())
+                    ? entity.getOriginalTitle().trim()
+                    : (entity.getTitle() != null ? entity.getTitle().trim() : ""));
+
         return new MobileNewsDto(
                 newsId,
-                entity.getTitle(),
+                effectiveTitle,
                 entity.getArticleUrl(),
                 publishedAtEpoch
         );
@@ -232,14 +234,23 @@ public class MobileSyncController {
         String newsId = "NEWS_" + entity.getId();
         int confidence = entity.getConfidencePct() != null
                 ? entity.getConfidencePct().intValue()
-                : 0;
+                : 80;
+
+        // Ưu tiên displaySummaryVi nếu có; nếu Qwen lỗi, dùng originalSummary bài gốc
+        String effectiveSummary = (entity.getDisplaySummaryVi() != null && !entity.getDisplaySummaryVi().isBlank())
+                ? entity.getDisplaySummaryVi().trim()
+                : ((entity.getSummaryPoints() != null && !entity.getSummaryPoints().isBlank())
+                    ? entity.getSummaryPoints().trim()
+                    : ((entity.getOriginalSummary() != null && !entity.getOriginalSummary().isBlank())
+                        ? entity.getOriginalSummary().trim()
+                        : ""));
 
         return new MobileAiAnalysisDto(
                 newsId,
-                entity.getSummaryPoints(),
-                entity.getSentiment(),
+                effectiveSummary,
+                entity.getSentiment() != null ? entity.getSentiment() : "NEUTRAL",
                 confidence,
-                entity.getReason()
+                entity.getReason() != null ? entity.getReason() : ""
         );
     }
 }

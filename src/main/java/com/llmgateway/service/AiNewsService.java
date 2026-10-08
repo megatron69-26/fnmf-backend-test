@@ -59,6 +59,17 @@ public class AiNewsService {
     private final com.llmgateway.service.provider.GeminiShardRouter geminiShardRouter;
     private volatile String selectedNewsShardName = null;
 
+    @Value("${news.cache-only-api:false}")
+    private boolean cacheOnlyApi = false;
+
+    public boolean isCacheOnlyApi() {
+        return cacheOnlyApi;
+    }
+
+    public void setCacheOnlyApi(boolean cacheOnlyApi) {
+        this.cacheOnlyApi = cacheOnlyApi;
+    }
+
     public static class GeminiRateLimitException extends RuntimeException {
         public GeminiRateLimitException(String message) {
             super(message);
@@ -141,6 +152,10 @@ public class AiNewsService {
     public NewsSyncResult getLiveAiNewsSyncResult(String symbol, int limit, boolean forceRefresh) {
         if (!isValidLimit(limit)) {
             throw new IllegalArgumentException("Tham số limit phải nằm trong khoảng từ 1 đến " + MAX_LIMIT);
+        }
+
+        if (cacheOnlyApi) {
+            return getCacheOnlyNewsSyncResult(symbol, limit);
         }
 
         final String requestedScope = AlphaNewsCoordinator.normalizeScope(symbol);
@@ -579,6 +594,102 @@ public class AiNewsService {
             throw new IllegalArgumentException("Tham số limit phải nằm trong khoảng từ 1 đến " + MAX_LIMIT);
         }
         return getLiveAiNewsSyncResult(symbol, limit).getItems();
+    }
+
+    /**
+     * Cache-only sync result: Chỉ đọc từ CSDL PostgreSQL (NewsAiCache),
+     * tuyệt đối KHÔNG gọi external provider (Alpha Vantage) hoặc LLM (Gemini/Qwen).
+     * Phục vụ các endpoint HTTP đồng bộ và Refresh của App để tránh block luồng người dùng.
+     */
+    public NewsSyncResult getCacheOnlyNewsSyncResult(String symbol, int limit) {
+        if (!isValidLimit(limit)) {
+            throw new IllegalArgumentException("Tham số limit phải nằm trong khoảng từ 1 đến " + MAX_LIMIT);
+        }
+
+        List<NewsFeedItemDto> items = new ArrayList<>();
+        List<NewsAiCache> cachedList = (symbol != null && !symbol.isBlank())
+                ? newsCacheService.findBySymbolOrderByPublishedAtDesc(symbol.toUpperCase(), limit * 3)
+                : newsCacheService.findTopByOrderByPublishedAtDesc(limit * 3);
+
+        if (cachedList.isEmpty()) {
+            cachedList = newsCacheService.findTopByOrderByPublishedAtDesc(limit * 3);
+        }
+        if (cachedList.isEmpty()) {
+            cachedList = newsCacheService.findAll(limit * 3);
+        }
+
+        for (NewsAiCache c : cachedList) {
+            String cOrigTitle = (c.getOriginalTitle() != null && !c.getOriginalTitle().isBlank())
+                    ? c.getOriginalTitle()
+                    : c.getTitle();
+            String cOrigSummary = (c.getOriginalSummary() != null && !c.getOriginalSummary().isBlank())
+                    ? c.getOriginalSummary()
+                    : (c.getTitle() != null ? c.getTitle() : "");
+            String publisher = NewsPublisherResolver.resolvePublisher(c.getSource(), c.getArticleUrl());
+            if (publisher == null || NewsPublisherResolver.isGeneric(publisher)) {
+                publisher = "";
+            }
+
+            String bulletsToParse = (c.getBulletPointsVi() != null && !c.getBulletPointsVi().isBlank())
+                    ? c.getBulletPointsVi()
+                    : c.getSummaryPoints();
+            List<String> rawBullets = parseSummaryPoints(bulletsToParse);
+            List<String> sanitizedBullets = NewsSummaryQualityPolicy.sanitizeBullets(rawBullets, cOrigTitle, cOrigSummary);
+
+            NewsFeedItemDto dto = new NewsFeedItemDto();
+            dto.setOriginalTitle(cOrigTitle);
+            dto.setOriginalSummary(cOrigSummary);
+            dto.setUrl(c.getArticleUrl());
+            dto.setTimePublished(c.getPublishedAt() != null ? c.getPublishedAt().toString() : "");
+            dto.setSource(publisher);
+            dto.setPublisher(publisher);
+            dto.setBannerImage(c.getBannerImage());
+            dto.setAuthor(c.getAuthor());
+            dto.setCategory("Market");
+            dto.setAiSentiment(c.getSentiment() != null ? c.getSentiment() : "NEUTRAL");
+            dto.setAiConfidence(c.getConfidencePct() != null ? c.getConfidencePct().intValue() : 80);
+            dto.setAiReason(c.getReason());
+            dto.setFromCache(true);
+            dto.setAnalyzedAt(c.getAnalyzedAt() != null ? c.getAnalyzedAt().toString() : null);
+
+            // Kiểm tra xem bài đã được bản địa hóa tiếng Việt hợp lệ chưa
+            boolean isLocalized = NewsLocalizationQualityPolicy.isFullyLocalized(
+                    c.getDisplayTitleVi(),
+                    cOrigTitle,
+                    sanitizedBullets
+            );
+
+            if (isLocalized) {
+                String displaySummary = (c.getDisplaySummaryVi() != null && !c.getDisplaySummaryVi().isBlank())
+                        ? c.getDisplaySummaryVi()
+                        : ((sanitizedBullets != null && !sanitizedBullets.isEmpty()) ? String.join(" ", sanitizedBullets) : null);
+                dto.setDisplayTitleVi(c.getDisplayTitleVi());
+                dto.setDisplaySummaryVi(displaySummary);
+                dto.setTitle(c.getDisplayTitleVi());
+                dto.setSummary(displaySummary);
+                dto.setAiSummary(sanitizedBullets);
+                dto.setBulletPointsVi(sanitizedBullets);
+            } else {
+                // Qwen lỗi hoặc chưa có bản dịch: Giữ nguyên bài gốc cho app đọc (fail-closed)
+                dto.setDisplayTitleVi(null);
+                dto.setDisplaySummaryVi(null);
+                dto.setTitle(cOrigTitle);
+                dto.setSummary(cOrigSummary);
+                dto.setAiSummary(sanitizedBullets != null && !sanitizedBullets.isEmpty() ? sanitizedBullets : Collections.emptyList());
+                dto.setBulletPointsVi(Collections.emptyList());
+            }
+
+            items.add(dto);
+            if (items.size() >= limit) break;
+        }
+
+        if (items.isEmpty()) {
+            return NewsSyncResult.empty("Chưa có bản tin mới");
+        }
+
+        String dataAsOf = items.get(0).getAnalyzedAt();
+        String latestPublishedAt = items.get(0).getTimePublished();
+        return NewsSyncResult.okFromCache(items, dataAsOf, latestPublishedAt);
     }
 
     /**

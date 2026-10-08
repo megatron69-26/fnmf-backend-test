@@ -194,6 +194,50 @@ public class NewsAiController {
             throw new IllegalStateException("ContentRefreshQuotaService chưa được cấu hình");
         }
 
+        // Nếu hệ thống đang chạy chế độ Cache-only (tin tức do worker chuẩn bị sẵn),
+        // thao tác Refresh trên app chỉ đọc cache và TUYỆT ĐỐI KHÔNG trừ quota của người dùng!
+        if (aiNewsService.isCacheOnlyApi()) {
+            RefreshQuotaDto quota = quotaService.getQuotaStatus(userId);
+            NewsSyncResult syncResult = aiNewsService.getCacheOnlyNewsSyncResult(symbol, limit);
+            Map<String, Object> response = new HashMap<>();
+            response.put("maxDailyRefreshes", quota.getMaxDailyRefreshes());
+            response.put("usedRefreshes", quota.getUsedRefreshes());
+            response.put("remainingRefreshes", quota.getRemainingRefreshes());
+            response.put("quotaDate", quota.getQuotaDate());
+            response.put("stale", syncResult.isStale());
+            response.put("fromCache", syncResult.isFromCache());
+            response.put("dataAsOf", syncResult.getDataAsOf());
+            response.put("latestPublishedAt", syncResult.getLatestPublishedAt());
+
+            if (!"ok".equals(syncResult.getStatus())) {
+                response.put("status", syncResult.getStatus());
+                response.put("message", syncResult.getMessage());
+                List<NewsFeedItemDto> items = syncResult.getItems();
+                if (items != null && !items.isEmpty()) {
+                    response.put("data", formatFeedItems(items, limit));
+                } else {
+                    response.put("data", Collections.emptyList());
+                }
+                return ResponseEntity.ok(response);
+            }
+
+            List<NewsFeedItemDto> feed = syncResult.getItems();
+            if (feed == null || feed.isEmpty()) {
+                response.put("status", "empty");
+                response.put("message", "Chưa có bản tin mới");
+                response.put("data", Collections.emptyList());
+                return ResponseEntity.ok(response);
+            }
+
+            List<Map<String, Object>> data = formatFeedItems(feed, limit);
+            response.put("status", "ok");
+            if (syncResult.getMessage() != null) {
+                response.put("message", syncResult.getMessage());
+            }
+            response.put("data", data);
+            return ResponseEntity.ok(response);
+        }
+
         // 1. Trừ lượt hạn mức dùng chung (Idempotent & Concurrency-safe)
         RefreshQuotaDto quota = quotaService.acquireRefreshQuota(userId, clientRequestId, "NEWS");
 
@@ -227,7 +271,7 @@ public class NewsAiController {
             return ResponseEntity.ok(response);
         }
 
-        // 3. Thực hiện làm mới tin tức cưỡng bức qua pipeline có kiểm soát
+        // 3. Thực hiện làm mới tin tức qua aiNewsService
         try {
             NewsSyncResult syncResult = aiNewsService.getLiveAiNewsSyncResult(symbol, limit, true);
             Map<String, Object> response = new HashMap<>();
@@ -354,11 +398,14 @@ public class NewsAiController {
             String origTitle = (item.getOriginalTitle() != null && !item.getOriginalTitle().isBlank())
                     ? item.getOriginalTitle().trim()
                     : "";
-            String displayTitle = (item.getDisplayTitleVi() != null && !item.getDisplayTitleVi().isBlank())
+            String displayTitleVi = (item.getDisplayTitleVi() != null && !item.getDisplayTitleVi().isBlank())
                     ? item.getDisplayTitleVi().trim()
-                    : (item.getTitle() != null ? item.getTitle().trim() : "");
+                    : "";
+            String displayTitle = !displayTitleVi.isBlank()
+                    ? displayTitleVi
+                    : (item.getTitle() != null && !item.getTitle().isBlank() ? item.getTitle().trim() : origTitle);
             map.put("originalTitle", origTitle);
-            map.put("displayTitleVi", displayTitle);
+            map.put("displayTitleVi", displayTitleVi);
             map.put("title", displayTitle);
 
             String origSummary = (item.getOriginalSummary() != null && !item.getOriginalSummary().isBlank())
@@ -370,11 +417,14 @@ public class NewsAiController {
                     ? item.getBulletPointsVi()
                     : (item.getAiSummary() != null ? item.getAiSummary() : new ArrayList<>());
 
-            String displaySummary = (item.getDisplaySummaryVi() != null && !item.getDisplaySummaryVi().isBlank())
+            String displaySummaryVi = (item.getDisplaySummaryVi() != null && !item.getDisplaySummaryVi().isBlank())
                     ? item.getDisplaySummaryVi().trim()
-                    : ((bulletsVi != null && !bulletsVi.isEmpty()) ? String.join(" ", bulletsVi).trim() : "");
+                    : "";
+            String displaySummary = !displaySummaryVi.isBlank()
+                    ? displaySummaryVi
+                    : ((bulletsVi != null && !bulletsVi.isEmpty()) ? String.join(" ", bulletsVi).trim() : origSummary);
 
-            map.put("displaySummaryVi", displaySummary);
+            map.put("displaySummaryVi", displaySummaryVi);
             map.put("summary", displaySummary);
 
             String publisher = (item.getPublisher() != null && !item.getPublisher().isBlank())
