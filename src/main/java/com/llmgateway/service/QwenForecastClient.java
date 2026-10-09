@@ -44,8 +44,11 @@ public class QwenForecastClient {
     @Value("${forecast.worker.qwen-url:http://127.0.0.1:8080/v1/chat/completions}")
     private String qwenUrl = "http://127.0.0.1:8080/v1/chat/completions";
 
-    @Value("${forecast.worker.qwen-model:qwen2.5-1.5b-instruct}")
-    private String qwenModel = "qwen2.5-1.5b-instruct";
+    @Value("${forecast.worker.qwen-model:qwen3.5-4b}")
+    private String qwenModel = "qwen3.5-4b";
+
+    @Value("${forecast.worker.qwen-timeout-seconds:180}")
+    private int qwenTimeoutSeconds = 180;
 
     @Autowired
     public QwenForecastClient(ObjectMapper objectMapper) {
@@ -174,7 +177,7 @@ public class QwenForecastClient {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(qwenUrl))
                     .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(120))
+                    .timeout(Duration.ofSeconds(qwenTimeoutSeconds))
                     .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
                     .build();
 

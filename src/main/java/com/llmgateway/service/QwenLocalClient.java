@@ -34,8 +34,11 @@ public class QwenLocalClient {
     @Value("${news.worker.qwen-url:http://127.0.0.1:8080/v1/chat/completions}")
     private String qwenUrl = "http://127.0.0.1:8080/v1/chat/completions";
 
-    @Value("${news.worker.qwen-model:qwen2.5-1.5b-instruct}")
-    private String qwenModel = "qwen2.5-1.5b-instruct";
+    @Value("${news.worker.qwen-model:qwen3.5-4b}")
+    private String qwenModel = "qwen3.5-4b";
+
+    @Value("${news.worker.qwen-timeout-seconds:120}")
+    private int qwenTimeoutSeconds = 120;
 
     public static class QwenTranslationResult {
         private final String displayTitleVi;
@@ -117,7 +120,7 @@ public class QwenLocalClient {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(qwenUrl))
                     .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(45))
+                    .timeout(Duration.ofSeconds(qwenTimeoutSeconds))
                     .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
                     .build();
 

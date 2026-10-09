@@ -334,7 +334,11 @@ public class FixedProviderShardingTest {
 
         HttpResponse<String> mockAiResponse = mock(HttpResponse.class);
         when(mockAiResponse.statusCode()).thenReturn(200);
-        when(mockAiResponse.body()).thenReturn(validAiJson);
+        // Each mocked forecast must bracket the actual asset price under the
+        // shared quality policy; one 220/240 fixture cannot represent BTC.
+        String btcAiJson = validAiJson.replace("220.0", "58000.0").replace("240.0", "62000.0");
+        String tslaAiJson = validAiJson.replace("240.0", "260.0").replace("220.0", "240.0");
+        when(mockAiResponse.body()).thenReturn(btcAiJson, validAiJson, tslaAiJson);
         doReturn(mockAiResponse).when(mockHttpClient).send(any(HttpRequest.class), any());
 
         List<CandleDto> candles = List.of(
