@@ -12,6 +12,7 @@ import com.llmgateway.entity.UserRole;
 import com.llmgateway.repository.UserRepository;
 import com.llmgateway.service.AiNewsService;
 import com.llmgateway.service.ContentRefreshQuotaService;
+import com.llmgateway.service.NewsLocalizationQualityPolicy;
 import com.llmgateway.service.NewsPublisherResolver;
 import com.llmgateway.util.JwtUtil;
 import jakarta.validation.Valid;
@@ -312,17 +313,18 @@ public class NewsAiController {
             response.put("data", data);
             return ResponseEntity.ok(response);
         } catch (Exception ex) {
-            log.warn("Lỗi provider khi làm mới News sau khi đã trừ lượt: {}", ex.getMessage());
+            log.warn("Lỗi provider khi làm mới News sau khi đã trừ lượt: {}. Hoàn trả hạn mức cho request.", ex.getMessage());
+            RefreshQuotaDto refundedQuota = quotaService.refundRefreshQuota(userId, clientRequestId, "NEWS");
             Map<String, Object> errResp = new HashMap<>();
             errResp.put("status", "degraded");
             errResp.put("message", "Dịch vụ xử lý tin tức tạm thời chưa sẵn sàng");
             errResp.put("stale", true);
             errResp.put("fromCache", true);
             errResp.put("data", Collections.emptyList());
-            errResp.put("maxDailyRefreshes", quota.getMaxDailyRefreshes());
-            errResp.put("usedRefreshes", quota.getUsedRefreshes());
-            errResp.put("remainingRefreshes", quota.getRemainingRefreshes());
-            errResp.put("quotaDate", quota.getQuotaDate());
+            errResp.put("maxDailyRefreshes", refundedQuota.getMaxDailyRefreshes());
+            errResp.put("usedRefreshes", refundedQuota.getUsedRefreshes());
+            errResp.put("remainingRefreshes", refundedQuota.getRemainingRefreshes());
+            errResp.put("quotaDate", refundedQuota.getQuotaDate());
             return ResponseEntity.ok(errResp);
         }
     }
@@ -401,9 +403,16 @@ public class NewsAiController {
             String displayTitleVi = (item.getDisplayTitleVi() != null && !item.getDisplayTitleVi().isBlank())
                     ? item.getDisplayTitleVi().trim()
                     : "";
-            String displayTitle = !displayTitleVi.isBlank()
-                    ? displayTitleVi
-                    : (item.getTitle() != null && !item.getTitle().isBlank() ? item.getTitle().trim() : origTitle);
+            String displayTitle;
+            if (NewsLocalizationQualityPolicy.hasVietnameseCharacteristics(displayTitleVi)) {
+                displayTitle = displayTitleVi;
+            } else if (NewsLocalizationQualityPolicy.hasVietnameseCharacteristics(item.getTitle())) {
+                displayTitle = item.getTitle().trim();
+                displayTitleVi = displayTitle;
+            } else {
+                displayTitle = "Đang cập nhật";
+                displayTitleVi = "Đang cập nhật";
+            }
             map.put("originalTitle", origTitle);
             map.put("displayTitleVi", displayTitleVi);
             map.put("title", displayTitle);
@@ -420,9 +429,19 @@ public class NewsAiController {
             String displaySummaryVi = (item.getDisplaySummaryVi() != null && !item.getDisplaySummaryVi().isBlank())
                     ? item.getDisplaySummaryVi().trim()
                     : "";
-            String displaySummary = !displaySummaryVi.isBlank()
-                    ? displaySummaryVi
-                    : ((bulletsVi != null && !bulletsVi.isEmpty()) ? String.join(" ", bulletsVi).trim() : origSummary);
+            String displaySummary;
+            if (NewsLocalizationQualityPolicy.hasVietnameseCharacteristics(displaySummaryVi)) {
+                displaySummary = displaySummaryVi;
+            } else if (bulletsVi != null && !bulletsVi.isEmpty() && bulletsVi.stream().allMatch(NewsLocalizationQualityPolicy::hasVietnameseCharacteristics)) {
+                displaySummary = String.join(" ", bulletsVi).trim();
+                displaySummaryVi = displaySummary;
+            } else if (NewsLocalizationQualityPolicy.hasVietnameseCharacteristics(item.getAiSummary() != null ? String.join(" ", item.getAiSummary()) : null)) {
+                displaySummary = String.join(" ", item.getAiSummary()).trim();
+                displaySummaryVi = displaySummary;
+            } else {
+                displaySummary = "Đang cập nhật";
+                displaySummaryVi = "Đang cập nhật";
+            }
 
             map.put("displaySummaryVi", displaySummaryVi);
             map.put("summary", displaySummary);

@@ -155,9 +155,10 @@ public class ForecastController {
             ForecastResponse response = forecastService.generateForecast(forcedRequest, true);
             response.applyQuota(quota);
             return ResponseEntity.ok(response);
-        } catch (ForecastUnavailableException | MarketDataUnavailableException ex) {
-            log.warn("Lỗi provider khi làm mới Forecast sau khi đã trừ lượt: {}", ex.getClass().getSimpleName());
-            return buildForecastUnavailableResponse(quota);
+        } catch (Exception ex) {
+            log.warn("Lỗi provider khi làm mới Forecast sau khi đã trừ lượt: {}. Thực hiện hoàn trả lượt làm mới.", ex.getClass().getSimpleName());
+            RefreshQuotaDto refundedQuota = quotaService.refundRefreshQuota(userId, clientRequestId, "FORECAST");
+            return buildForecastUnavailableResponse(refundedQuota);
         }
     }
 

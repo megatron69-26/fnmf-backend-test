@@ -14,7 +14,7 @@
 
     <groupId>com.llmgateway</groupId>
     <artifactId>llm-gateway</artifactId>
-    <version>1.1.17</version>
+    <version>1.1.18</version>
     <name>FNMF Backend</name>
     <description>Financial News and Market Forecasting Backend REST API with Oracle Database and AI Gateway</description>
 

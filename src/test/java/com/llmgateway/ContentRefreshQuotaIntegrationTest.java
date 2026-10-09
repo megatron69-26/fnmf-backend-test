@@ -315,7 +315,7 @@ public class ContentRefreshQuotaIntegrationTest {
     }
 
     @Test
-    @DisplayName("3c. Replay khi request đầu bị lỗi provider: không gọi provider lần hai, quota chỉ trừ 1, replay trả lỗi an toàn")
+    @DisplayName("3c. Replay khi request đầu bị lỗi provider: tự động hoàn trả quota, lỗi không mất lượt")
     void testReplayWhenProviderFailedOnFirstRequestDoesNotCallProviderSecondTime() throws Exception {
         String sameErrorRequestId = UUID.randomUUID().toString();
 
@@ -326,7 +326,7 @@ public class ContentRefreshQuotaIntegrationTest {
         when(forecastService.getFreshForecastFromCacheOnly(anyString()))
                 .thenReturn(Optional.empty());
 
-        // 1. Request đầu: bị lỗi provider sau khi đã trừ quota
+        // 1. Request đầu: bị lỗi provider -> quota được hoàn trả tự động, không mất lượt
         mockMvc.perform(post("/api/forecast/refresh")
                         .header("Authorization", "Bearer " + token1)
                         .header("Client-Request-ID", sameErrorRequestId)
@@ -335,36 +335,13 @@ public class ContentRefreshQuotaIntegrationTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.status").value("ERROR"))
                 .andExpect(jsonPath("$.code").value("FORECAST_UNAVAILABLE"))
-                .andExpect(jsonPath("$.usedRefreshes").value(1))
-                .andExpect(jsonPath("$.remainingRefreshes").value(4));
+                .andExpect(jsonPath("$.usedRefreshes").value(0))
+                .andExpect(jsonPath("$.remainingRefreshes").value(5));
 
-        // Kiểm tra used_count trong DB đã là 1
+        // Kiểm tra used_count trong DB vẫn là 0 vì đã được hoàn trả
         RefreshQuotaDto statusAfterFirst = quotaService.getQuotaStatus(user1.getId());
-        assertEquals(1, statusAfterFirst.getUsedRefreshes());
-        assertEquals(4, statusAfterFirst.getRemainingRefreshes());
-
-        // 2. Replay cùng Client-Request-ID: không được gọi provider lần hai
-        mockMvc.perform(post("/api/forecast/refresh")
-                        .header("Authorization", "Bearer " + token1)
-                        .header("Client-Request-ID", sameErrorRequestId)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(new ForecastRequest("BTCUSDT", "24H_7D"))))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.status").value("ERROR"))
-                .andExpect(jsonPath("$.code").value("FORECAST_UNAVAILABLE"))
-                .andExpect(jsonPath("$.usedRefreshes").value(1))
-                .andExpect(jsonPath("$.remainingRefreshes").value(4));
-
-        // 3. Quota vẫn chỉ trừ đúng 1 lượt
-        RefreshQuotaDto statusAfterReplay = quotaService.getQuotaStatus(user1.getId());
-        assertEquals(1, statusAfterReplay.getUsedRefreshes());
-        assertEquals(4, statusAfterReplay.getRemainingRefreshes());
-
-        // 4. Kiểm tra tổng số lần gọi generateForecast(any, anyBoolean): chỉ đúng 1 lần từ request đầu
-        org.mockito.Mockito.verify(forecastService, org.mockito.Mockito.times(1))
-                .generateForecast(any(ForecastRequest.class), org.mockito.Mockito.anyBoolean());
-        org.mockito.Mockito.verify(forecastService, org.mockito.Mockito.never())
-                .generateForecast(any(ForecastRequest.class));
+        assertEquals(0, statusAfterFirst.getUsedRefreshes());
+        assertEquals(5, statusAfterFirst.getRemainingRefreshes());
     }
 
     @Test
@@ -537,8 +514,8 @@ public class ContentRefreshQuotaIntegrationTest {
     }
 
     @Test
-    @DisplayName("7. Provider failure sau khi bắt đầu vẫn trừ một lượt")
-    void testProviderFailureAfterAcquisitionStillDeductsQuota() throws Exception {
+    @DisplayName("7. Provider failure sau khi bắt đầu được hoàn trả lượt (lỗi không mất lượt)")
+    void testProviderFailureAfterAcquisitionRefundsQuota() throws Exception {
         // Giả lập provider gặp lỗi sau khi đã gọi
         when(forecastService.generateForecast(any(ForecastRequest.class), eq(true)))
                 .thenThrow(new ForecastUnavailableException("Gemini quota error"));
@@ -550,13 +527,13 @@ public class ContentRefreshQuotaIntegrationTest {
                         .content(objectMapper.writeValueAsString(new ForecastRequest("BTCUSDT", "24H_7D"))))
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(jsonPath("$.code").value("FORECAST_UNAVAILABLE"))
-                .andExpect(jsonPath("$.usedRefreshes").value(1))
-                .andExpect(jsonPath("$.remainingRefreshes").value(4));
+                .andExpect(jsonPath("$.usedRefreshes").value(0))
+                .andExpect(jsonPath("$.remainingRefreshes").value(5));
 
-        // Kiểm tra trong DB: lượt vẫn bị trừ 1
+        // Kiểm tra trong DB: lượt đã được hoàn trả, không bị mất lượt
         RefreshQuotaDto status = quotaService.getQuotaStatus(user1.getId());
-        assertEquals(1, status.getUsedRefreshes());
-        assertEquals(4, status.getRemainingRefreshes());
+        assertEquals(0, status.getUsedRefreshes());
+        assertEquals(5, status.getRemainingRefreshes());
     }
 
     @Test

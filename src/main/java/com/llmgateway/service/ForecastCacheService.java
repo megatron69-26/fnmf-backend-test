@@ -28,6 +28,7 @@ public class ForecastCacheService {
     public static final int FORECAST_CACHE_HOURS = 24;
     public static final int FORECAST_CACHE_MINUTES = FORECAST_CACHE_HOURS * 60;
     public static final String REQUIRED_SOURCE = "GEMINI";
+    public static final java.util.Set<String> ALLOWED_SOURCES = java.util.Set.of("GEMINI", "QWEN", "QWEN_LOCAL");
 
     private final MarketForecastRepository forecastRepository;
     private final ObjectMapper objectMapper;
@@ -49,7 +50,7 @@ public class ForecastCacheService {
     /**
      * Lấy bản dự báo còn hạn từ CSDL nếu thoả mãn:
      * 1. Tạo trong vòng 24 giờ.
-     * 2. Nguồn phân tích là GEMINI (Zero Heuristic).
+     * 2. Nguồn phân tích là GEMINI hoặc QWEN (Zero Heuristic).
      */
     public Optional<ForecastResponse> getFreshForecast(String symbol, MarketPriceDto priceDto) {
         String cleanSymbol = symbol.trim().toUpperCase();
@@ -61,8 +62,8 @@ public class ForecastCacheService {
 
         MarketForecast cached = cachedOpt.get();
 
-        // 1. Kiểm tra nguồn phân tích: chỉ chấp nhận GEMINI
-        if (cached.getAnalysisSource() == null || !REQUIRED_SOURCE.equalsIgnoreCase(cached.getAnalysisSource())) {
+        // 1. Kiểm tra nguồn phân tích: chỉ chấp nhận GEMINI hoặc QWEN
+        if (cached.getAnalysisSource() == null || !ALLOWED_SOURCES.contains(cached.getAnalysisSource().trim().toUpperCase())) {
             log.info("BỎ QUA CACHE KHÔNG ĐẠT CHUẨN | symbol={} | source={}", cleanSymbol, cached.getAnalysisSource());
             return Optional.empty();
         }
@@ -72,7 +73,7 @@ public class ForecastCacheService {
             return Optional.empty();
         }
 
-        log.info("LẤY DỰ BÁO TỪ DATABASE CACHE (GEMINI) | symbol={} | recommendation={}", cleanSymbol, cached.getRecommendation());
+        log.info("LẤY DỰ BÁO TỪ DATABASE CACHE ({}) | symbol={} | recommendation={}", cached.getAnalysisSource(), cleanSymbol, cached.getRecommendation());
         
         List<String> keyDrivers = parseKeyDrivers(cached.getAnalysisSummary());
         if (keyDrivers.isEmpty()) {
@@ -93,7 +94,7 @@ public class ForecastCacheService {
                 keyDrivers,
                 cached.getTechnicalOutlook(),
                 cached.getFundamentalOutlook(),
-                REQUIRED_SOURCE,
+                cached.getAnalysisSource(),
                 cached.getCandleCount(),
                 true,
                 cached.getCreatedAt()
@@ -120,17 +121,19 @@ public class ForecastCacheService {
     }
 
     /**
-     * Lưu bản dự báo AI mới vào CSDL với analysis_source = GEMINI.
+     * Lưu bản dự báo AI mới vào CSDL với analysis_source = GEMINI hoặc QWEN.
      */
     public void saveForecast(ForecastResponse response) {
-        if (response == null || !REQUIRED_SOURCE.equalsIgnoreCase(response.getAnalysisSource())) {
-            log.warn("Từ chối lưu bản dự báo không rõ nguồn gốc hoặc không phải từ GEMINI");
+        if (response == null || response.getAnalysisSource() == null || !ALLOWED_SOURCES.contains(response.getAnalysisSource().trim().toUpperCase())) {
+            log.warn("Từ chối lưu bản dự báo không rõ nguồn gốc hoặc không thuộc danh sách cho phép: {}",
+                    response != null ? response.getAnalysisSource() : "null");
             return;
         }
 
         try {
             String driversJson = objectMapper.writeValueAsString(response.getKeyDrivers());
             BigDecimal confidenceBd = response.getConfidenceScore() != null ? BigDecimal.valueOf(response.getConfidenceScore()) : null;
+            String source = response.getAnalysisSource().trim().toUpperCase();
 
             MarketForecast entity = new MarketForecast(
                     response.getSymbol(),
@@ -144,13 +147,14 @@ public class ForecastCacheService {
                     driversJson,
                     response.getTechnicalOutlook(),
                     response.getFundamentalOutlook(),
-                    REQUIRED_SOURCE,
+                    source,
                     response.getCandleCount()
             );
             entity.setAiShard(response.getAiShard());
 
             forecastRepository.save(entity);
-            log.info("ĐÃ LƯU DỰ BÁO AI MỚI VÀO CSDL | symbol={} | recommendation={}", response.getSymbol(), response.getRecommendation());
+            log.info("ĐÃ LƯU DỰ BÁO AI MỚI VÀO CSDL | symbol={} | source={} | recommendation={}",
+                    response.getSymbol(), source, response.getRecommendation());
         } catch (Exception e) {
             log.warn("Không thể lưu dự báo vào CSDL: {}", e.getMessage());
         }

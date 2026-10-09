@@ -36,8 +36,25 @@ public class ForecastService {
     private final MarketDataService marketDataService;
     private final ForecastCacheService forecastCacheService;
     private final GeminiForecastClient geminiForecastClient;
+    private QwenForecastClient qwenForecastClient;
     private final FixedMarketProviderRouter fixedMarketProviderRouter;
     private final FixedMarketCacheManager fixedMarketCacheManager;
+
+    @org.springframework.beans.factory.annotation.Value("${forecast.cache-only-api:false}")
+    private boolean cacheOnlyApi = false;
+
+    public boolean isCacheOnlyApi() {
+        return cacheOnlyApi;
+    }
+
+    public void setCacheOnlyApi(boolean cacheOnlyApi) {
+        this.cacheOnlyApi = cacheOnlyApi;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setQwenForecastClient(QwenForecastClient qwenForecastClient) {
+        this.qwenForecastClient = qwenForecastClient;
+    }
 
     public ForecastService(MarketForecastRepository forecastRepository,
                            NewsAiCacheRepository newsAiCacheRepository,
@@ -64,6 +81,22 @@ public class ForecastService {
              geminiForecastClient,
              null,
              null);
+    }
+
+    public ForecastService(MarketForecastRepository forecastRepository,
+                           NewsAiCacheRepository newsAiCacheRepository,
+                           MarketDataService marketDataService,
+                           ForecastCacheService forecastCacheService,
+                           GeminiForecastClient geminiForecastClient,
+                           QwenForecastClient qwenForecastClient) {
+        this(forecastRepository,
+             newsAiCacheRepository,
+             marketDataService,
+             forecastCacheService,
+             geminiForecastClient,
+             null,
+             null);
+        this.qwenForecastClient = qwenForecastClient;
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -95,12 +128,15 @@ public class ForecastService {
     public ForecastResponse generateMarketForecast(String timeframe, boolean bypassCache) {
         String tf = (timeframe != null && !timeframe.isBlank()) ? timeframe : "24H_7D";
 
-        // 1. Kiểm tra CSDL cache (chỉ chấp nhận nguồn GEMINI)
-        // Zero external calls: Không gọi resolveMarketBenchmarkPrice(), không gọi Binance, không gọi Gemini khi có cache
+        // 1. Kiểm tra CSDL cache (chấp nhận nguồn QWEN hoặc GEMINI)
+        // Zero external calls: Không gọi resolveMarketBenchmarkPrice(), không gọi Binance, không gọi LLM khi có cache
         if (!bypassCache) {
             Optional<ForecastResponse> cached = getMarketForecastFromDb(tf);
             if (cached.isPresent()) {
                 return cached.get();
+            }
+            if (cacheOnlyApi) {
+                throw new ForecastUnavailableException("Đang cập nhật nhận định thị trường. Vui lòng thử lại sau.");
             }
         }
 
@@ -112,15 +148,16 @@ public class ForecastService {
             List<CandleDto> candles = marketDataService.getCandles("BTCUSDT", "daily");
             List<NewsAiCache> recentNews = fetchMarketNews();
 
-            // 3. Phân tích qua Gemini AI với dữ liệu thực tế
-            ForecastResponse response = geminiForecastClient.requestMarketForecast(
-                    allPrices,
-                    candles,
-                    recentNews,
-                    tf
-            );
+            // 3. Phân tích qua Qwen2.5-1.5B (hoặc Gemini fallback) với dữ liệu thực tế
+            ForecastResponse response = null;
+            if (qwenForecastClient != null) {
+                response = qwenForecastClient.requestMarketForecast(allPrices, candles, recentNews, tf);
+            } else if (geminiForecastClient != null) {
+                response = geminiForecastClient.requestMarketForecast(allPrices, candles, recentNews, tf);
+            }
 
             if (response != null) {
+                ForecastQualityPolicy.validateOrThrow(response);
                 // 4. Lưu bản dự báo vào CSDL
                 forecastCacheService.saveForecast(response);
                 response.setFromCache(false);
@@ -129,19 +166,19 @@ public class ForecastService {
             }
         } catch (Exception e) {
             lastException = e;
-            log.warn("Lỗi khi tạo nhận định toàn thị trường từ Gemini: {}", e.getClass().getSimpleName());
+            log.warn("Lỗi khi tạo nhận định toàn thị trường từ provider: {}", e.getClass().getSimpleName());
         }
 
-        // 5. Fallback khi Gemini lỗi hoặc không có giá BTC thật:
-        // Tìm bản ghi MARKET nguồn GEMINI hợp lệ gần nhất trong CSDL (không bỏ cuộc nếu bản mới nhất sai nguồn)
+        // 5. Fallback khi provider lỗi hoặc không có giá BTC thật:
+        // Tìm bản ghi MARKET hợp lệ gần nhất trong CSDL (bản cũ có nhãn thời gian)
         Optional<ForecastResponse> fallbackOpt = getMarketForecastFromDb(tf);
         if (fallbackOpt.isPresent()) {
             ForecastResponse fallback = fallbackOpt.get();
-            fallback.setStale(true); // Cưỡng bức stale khi rơi vào fallback sau khi Gemini gặp sự cố
+            fallback.setStale(true); // Cưỡng bức stale khi rơi vào fallback sau sự cố
             return fallback;
         }
 
-        // 6. Nếu không có giá thật và không có cache GEMINI hợp lệ: trả lỗi 503 an toàn cố định
+        // 6. Nếu không có giá thật và không có cache hợp lệ: trả lỗi 503 an toàn cố định
         throw new ForecastUnavailableException(
                 "Chưa thể tạo nhận định lúc này. Vui lòng thử lại sau.",
                 lastException);
@@ -328,10 +365,11 @@ public class ForecastService {
         }
 
         for (MarketForecast record : records) {
-            if ("GEMINI".equalsIgnoreCase(record.getAnalysisSource())) {
+            String source = record.getAnalysisSource();
+            if ("QWEN".equalsIgnoreCase(source) || "QWEN_LOCAL".equalsIgnoreCase(source) || "GEMINI".equalsIgnoreCase(source)) {
                 List<String> keyDrivers = forecastCacheService.parseKeyDrivers(record.getAnalysisSummary());
                 if (keyDrivers == null || keyDrivers.isEmpty()) {
-                    log.warn("Bỏ qua bản ghi MARKET nguồn GEMINI thiếu key drivers");
+                    log.warn("Bỏ qua bản ghi MARKET nguồn {} thiếu key drivers", source);
                     continue;
                 }
                 ForecastResponse resp = new ForecastResponse(
@@ -347,7 +385,7 @@ public class ForecastService {
                         keyDrivers,
                         record.getTechnicalOutlook(),
                         record.getFundamentalOutlook(),
-                        "GEMINI",
+                        source != null ? source : "QWEN",
                         record.getCandleCount() != null ? record.getCandleCount() : 30,
                         true,
                         record.getCreatedAt()
@@ -361,14 +399,14 @@ public class ForecastService {
                 resp.setStale(!isFresh);
 
                 if (ForecastQualityPolicy.isValid(resp)) {
-                    log.info("LẤY DỰ BÁO MARKET TỪ DATABASE CACHE | id={} | stale={} | createdAt={}",
-                            record.getId(), resp.isStale(), record.getCreatedAt());
+                    log.info("LẤY DỰ BÁO MARKET TỪ DATABASE CACHE | id={} | source={} | stale={} | createdAt={}",
+                            record.getId(), source, resp.isStale(), record.getCreatedAt());
                     return Optional.of(resp);
                 } else {
-                    log.warn("Bản ghi MARKET nguồn GEMINI không thỏa mãn chính sách chất lượng");
+                    log.warn("Bản ghi MARKET nguồn {} không thỏa mãn chính sách chất lượng", source);
                 }
             } else {
-                log.warn("Bỏ qua bản ghi MARKET không phải nguồn GEMINI: {}", record.getAnalysisSource());
+                log.warn("Bỏ qua bản ghi MARKET không thuộc nguồn hợp lệ: {}", record.getAnalysisSource());
             }
         }
 

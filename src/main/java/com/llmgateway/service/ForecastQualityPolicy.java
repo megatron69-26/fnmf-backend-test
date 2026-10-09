@@ -42,6 +42,11 @@ public class ForecastQualityPolicy {
     );
 
     public static final String REQUIRED_ANALYSIS_SOURCE = "GEMINI";
+    public static final Set<String> ALLOWED_ANALYSIS_SOURCES = Set.of(
+            "GEMINI",
+            "QWEN",
+            "QWEN_LOCAL"
+    );
 
     private static final List<String> FORBIDDEN_PHRASES = List.of(
             "vui lòng đợi",
@@ -50,7 +55,12 @@ public class ForecastQualityPolicy {
             "dữ liệu giả lập",
             "heuristic",
             "placeholder",
-            "đang cập nhật"
+            "đang cập nhật",
+            "cam kết lợi nhuận",
+            "lãi 100%",
+            "chắc chắn mua",
+            "chắc chắn bán",
+            "không thể lỗ"
     );
 
     private static final Pattern VIETNAMESE_CHAR_PATTERN = Pattern.compile(
@@ -115,9 +125,9 @@ public class ForecastQualityPolicy {
             throw new ForecastUnavailableException("Giá hiện tại phải lớn hơn 0");
         }
 
-        // 3. Nguồn phân tích bắt buộc là GEMINI
-        if (forecast.getAnalysisSource() == null || !REQUIRED_ANALYSIS_SOURCE.equalsIgnoreCase(forecast.getAnalysisSource().trim())) {
-            throw new ForecastUnavailableException("Nguồn phân tích không hợp lệ (bắt buộc GEMINI): " + forecast.getAnalysisSource());
+        // 3. Nguồn phân tích bắt buộc là QWEN hoặc GEMINI
+        if (forecast.getAnalysisSource() == null || !ALLOWED_ANALYSIS_SOURCES.contains(forecast.getAnalysisSource().trim().toUpperCase())) {
+            throw new ForecastUnavailableException("Nguồn phân tích không hợp lệ (bắt buộc QWEN hoặc GEMINI): " + forecast.getAnalysisSource());
         }
 
         // 4. Số lượng nến thực tế từ 1 đến 30

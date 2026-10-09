@@ -138,6 +138,8 @@ public class ContentRefreshQuotaService {
             status.setReplay(true);
             if ("ACCEPTED".equalsIgnoreCase(prev.getStatus())) {
                 return status;
+            } else if ("REFUNDED".equalsIgnoreCase(prev.getStatus())) {
+                log.info("RETRY AFTER REFUND | userId={} | clientRequestId={} -> Tái cấp phát hạn mức", userId, cleanRequestId);
             } else {
                 throw new DailyRefreshLimitReachedException(status);
             }
@@ -156,7 +158,8 @@ public class ContentRefreshQuotaService {
 
         // 3. Kiểm tra hạn mức 5 lượt
         if (quotaRow.getUsedCount() >= MAX_DAILY_REFRESHES) {
-            ContentRefreshEvent rejectedEvent = new ContentRefreshEvent(userId, today, cleanRequestId, cleanModule, "REJECTED");
+            ContentRefreshEvent rejectedEvent = existingEvent.orElseGet(() -> new ContentRefreshEvent(userId, today, cleanRequestId, cleanModule, "REJECTED"));
+            rejectedEvent.setStatus("REJECTED");
             try {
                 eventRepository.saveAndFlush(rejectedEvent);
             } catch (Exception ex) {
@@ -174,11 +177,19 @@ public class ContentRefreshQuotaService {
         quotaRow.setUpdatedAt(LocalDateTime.now(clock.withZone(VIETNAM_ZONE)));
         quotaRepository.saveAndFlush(quotaRow);
 
-        ContentRefreshEvent acceptedEvent = new ContentRefreshEvent(userId, today, cleanRequestId, cleanModule, "ACCEPTED");
-        try {
-            eventRepository.saveAndFlush(acceptedEvent);
-        } catch (Exception ex) {
-            log.debug("Event already recorded: {}", ex.getMessage());
+        if (existingEvent.isPresent()) {
+            ContentRefreshEvent prev = existingEvent.get();
+            prev.setStatus("ACCEPTED");
+            prev.setModule(cleanModule);
+            prev.setQuotaDate(today);
+            eventRepository.saveAndFlush(prev);
+        } else {
+            ContentRefreshEvent acceptedEvent = new ContentRefreshEvent(userId, today, cleanRequestId, cleanModule, "ACCEPTED");
+            try {
+                eventRepository.saveAndFlush(acceptedEvent);
+            } catch (Exception ex) {
+                log.debug("Event already recorded: {}", ex.getMessage());
+            }
         }
 
         int remaining = Math.max(0, MAX_DAILY_REFRESHES - newUsed);
@@ -186,5 +197,63 @@ public class ContentRefreshQuotaService {
                 userId, cleanModule, today, newUsed, MAX_DAILY_REFRESHES, remaining);
 
         return new RefreshQuotaDto(MAX_DAILY_REFRESHES, newUsed, remaining, today.toString());
+    }
+
+    /**
+     * Hoàn trả đúng 1 lượt làm mới nếu trước đó đã bị trừ (status = ACCEPTED) nhưng xử lý gặp sự cố.
+     * Kiểm tra bản ghi lượt thực tế trước khi hoàn trả; an toàn với concurrency và không reset hàng loạt.
+     */
+    public RefreshQuotaDto refundRefreshQuota(Long userId, String clientRequestId, String module) {
+        LocalDate today = getCurrentVietnamDate();
+        if (transactionManager != null) {
+            TransactionTemplate template = new TransactionTemplate(transactionManager);
+            template.setIsolationLevel(TransactionTemplate.ISOLATION_READ_COMMITTED);
+            return template.execute(status -> executeRefundQuota(userId, clientRequestId, module, today));
+        } else {
+            return executeRefundQuota(userId, clientRequestId, module, today);
+        }
+    }
+
+    private RefreshQuotaDto executeRefundQuota(Long userId, String clientRequestId, String module, LocalDate today) {
+        if (userId == null || clientRequestId == null || clientRequestId.isBlank()) {
+            return getQuotaStatus(userId);
+        }
+        String cleanRequestId = clientRequestId.trim();
+        String cleanModule = (module != null && !module.isBlank()) ? module.trim().toUpperCase() : "UNKNOWN";
+
+        Optional<ContentRefreshEvent> eventOpt = eventRepository.findByUserIdAndClientRequestId(userId, cleanRequestId);
+        if (eventOpt.isEmpty()) {
+            log.warn("REFUND QUOTA IGNORED: Không tìm thấy bản ghi event | userId={} | clientRequestId={}", userId, cleanRequestId);
+            return getQuotaStatus(userId);
+        }
+
+        ContentRefreshEvent event = eventOpt.get();
+        if (!"ACCEPTED".equalsIgnoreCase(event.getStatus())) {
+            log.warn("REFUND QUOTA IGNORED: Bản ghi event không ở trạng thái ACCEPTED (hiện tại: {}) | userId={} | clientRequestId={}",
+                    event.getStatus(), userId, cleanRequestId);
+            return getQuotaStatus(userId);
+        }
+
+        event.setStatus("REFUNDED");
+        eventRepository.saveAndFlush(event);
+
+        LocalDate quotaDate = event.getQuotaDate() != null ? event.getQuotaDate() : today;
+        UserDailyRefreshQuota quotaRow = quotaRepository.findByUserIdAndQuotaDateForUpdate(userId, quotaDate)
+                .orElse(null);
+
+        if (quotaRow != null) {
+            int oldUsed = quotaRow.getUsedCount();
+            int newUsed = Math.max(0, oldUsed - 1);
+            quotaRow.setUsedCount(newUsed);
+            quotaRow.setUpdatedAt(LocalDateTime.now(clock.withZone(VIETNAM_ZONE)));
+            quotaRepository.saveAndFlush(quotaRow);
+
+            int remaining = Math.max(0, MAX_DAILY_REFRESHES - newUsed);
+            log.info("REFUND QUOTA SUCCESS | userId={} | clientRequestId={} | module={} | date={} | used {}->{} | remaining={}",
+                    userId, cleanRequestId, cleanModule, quotaDate, oldUsed, newUsed, remaining);
+            return new RefreshQuotaDto(MAX_DAILY_REFRESHES, newUsed, remaining, quotaDate.toString());
+        }
+
+        return getQuotaStatus(userId);
     }
 }
