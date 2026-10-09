@@ -1,13 +1,18 @@
 package com.llmgateway.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.llmgateway.dto.mobile.MobileAiAnalysisDto;
 import com.llmgateway.dto.mobile.MobileNewsBundleResponse;
 import com.llmgateway.dto.mobile.MobileNewsDto;
 import com.llmgateway.entity.NewsAiCache;
 import com.llmgateway.service.AiNewsService;
-import com.llmgateway.dto.news.NewsFeedItemDto;
+import com.llmgateway.service.NewsCacheService;
+import com.llmgateway.service.NewsLocalizationQualityPolicy;
+import com.llmgateway.service.NewsSummaryQualityPolicy;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -16,7 +21,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.ZoneOffset;
-import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -32,11 +37,12 @@ import java.util.stream.Collectors;
  *   - MobileAiAnalysisDto ←→  Room Entity "AI_Analysis" (newsId, summary, sentiment, confidenceScore, reason)
  *
  * Luồng xử lý:
- *   1. Đọc dữ liệu từ CSDL (NEWS_AI_CACHE) - cùng nguồn duy nhất với /api/news/feed
- *   2. Chuyển đổi (map) các trường sang đúng format Room DB của Mạnh
- *   3. Trả JSON cho Android → Android insert thẳng vào Room DB → Hiển thị Offline
- *
- * ĐẢM BẢO: KHÔNG GÂY XUNG ĐỘT VỚI CÁC API GỐC CỦA KHÔI.
+ *   1. Đọc dữ liệu từ CSDL (NEWS_AI_CACHE) - Cache-Only, tuyệt đối không gọi LLM hay mạng ngoài.
+ *   2. Kiểm định chất lượng nghiêm ngặt (Fail-Closed):
+ *      - LOẠI BỎ 100% bài chưa dịch (RAW_PENDING), bài lỗi (QWEN_ERROR), hoặc bài chưa đạt chuẩn tiếng Việt.
+ *      - TUYỆT ĐỐI KHÔNG fallback sang tiêu đề hoặc tóm tắt tiếng Anh gốc trên Mobile App.
+ *   3. Chuyển đổi (map) các trường sang đúng format Room DB của Mạnh.
+ *   4. Trả JSON cho Android → Android insert thẳng vào Room DB → Hiển thị Offline.
  * ===========================================================================================
  */
 @RestController
@@ -45,24 +51,32 @@ import java.util.stream.Collectors;
 public class MobileSyncController {
 
     private final AiNewsService aiNewsService;
-    private final com.llmgateway.service.NewsCacheService newsCacheService;
+    private final NewsCacheService newsCacheService;
+    private final ObjectMapper objectMapper;
 
-    public MobileSyncController(AiNewsService aiNewsService, com.llmgateway.service.NewsCacheService newsCacheService) {
+    @Autowired
+    public MobileSyncController(AiNewsService aiNewsService,
+                                NewsCacheService newsCacheService,
+                                @Autowired(required = false) ObjectMapper objectMapper) {
         this.aiNewsService = aiNewsService;
         this.newsCacheService = newsCacheService;
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
+    }
+
+    public MobileSyncController(AiNewsService aiNewsService, NewsCacheService newsCacheService) {
+        this(aiNewsService, newsCacheService, new ObjectMapper());
     }
 
     /**
      * GET /api/mobile/news/sync?symbol=BTCUSDT&limit=5
      *
-     * API chính để Android gọi lấy danh sách tin tức + AI phân tích,
-     * trả về format khớp 100% với Room DB của Mạnh.
+     * API chính để Android gọi lấy danh sách tin tức + AI phân tích.
+     * Invariant: Chỉ trả về các bài tiếng Việt đạt chuẩn. Bài tiếng Anh, RAW_PENDING hoặc lỗi bị loại bỏ hoàn toàn.
      */
     @GetMapping("/sync")
     @Operation(
             summary = "Đồng bộ Tin tức + AI Analysis cho Room DB Android",
-            description = "Lấy danh sách bài báo thật từ Alpha Vantage + Kết quả phân tích Gemini AI, " +
-                    "trả về format JSON khớp 100% với Room Entity News & AI_Analysis của bạn Mạnh. " +
+            description = "Lấy danh sách tin tức đã được dịch và phân tích tiếng Việt đạt chuẩn từ CSDL Cache. " +
                     "Android chỉ cần gọi API này rồi insert thẳng vào Room DB để hiển thị offline."
     )
     public ResponseEntity<?> syncNewsForMobile(
@@ -78,28 +92,39 @@ public class MobileSyncController {
         }
 
         try {
-            // Bước 1: Lấy dữ liệu từ CSDL Cache qua NewsCacheService (Cache-only)
-            List<NewsAiCache> cachedNews;
+            // Bước 1: Lấy danh sách ứng viên từ CSDL Cache qua NewsCacheService (Cache-only)
+            int fetchPool = Math.max(limit * 5, 50);
+            List<NewsAiCache> candidateNews;
             if (symbol != null && !symbol.isBlank()) {
-                cachedNews = newsCacheService.findBySymbolOrderByPublishedAtDesc(symbol, limit);
+                candidateNews = newsCacheService.findBySymbolOrderByPublishedAtDesc(symbol, fetchPool);
             } else {
-                cachedNews = newsCacheService.findTopByOrderByPublishedAtDesc(limit);
+                candidateNews = newsCacheService.findTopByOrderByPublishedAtDesc(fetchPool);
             }
 
-            // Bước 2: Nếu rỗng cho symbol cụ thể, fallback sang tin thị trường chung trong cache
-            if (cachedNews.isEmpty()) {
-                cachedNews = newsCacheService.findTopByOrderByPublishedAtDesc(limit);
-                if (cachedNews.isEmpty()) {
-                    cachedNews = newsCacheService.findAll(limit);
+            // Bước 2: Lọc NGHIÊM NGẶT chỉ lấy bài tiếng Việt đạt chuẩn (loại bỏ RAW_PENDING, QWEN_ERROR, bài tiếng Anh)
+            List<NewsAiCache> qualifiedNews = candidateNews.stream()
+                    .filter(this::isQualifiedForMobile)
+                    .collect(Collectors.toList());
+
+            // Bước 3: Nếu rỗng cho symbol cụ thể, fallback sang tin thị trường chung trong cache
+            if (qualifiedNews.isEmpty()) {
+                List<NewsAiCache> marketCandidates = newsCacheService.findTopByOrderByPublishedAtDesc(fetchPool);
+                qualifiedNews = marketCandidates.stream()
+                        .filter(this::isQualifiedForMobile)
+                        .collect(Collectors.toList());
+                if (qualifiedNews.isEmpty()) {
+                    qualifiedNews = newsCacheService.findAll(fetchPool).stream()
+                            .filter(this::isQualifiedForMobile)
+                            .collect(Collectors.toList());
                 }
             }
 
-            // Bước 3: Cache-only invariant: Kể cả khi cache rỗng, TUYỆT ĐỐI KHÔNG gọi LLM hoặc external provider
-            if (cachedNews.isEmpty()) {
+            // Bước 4: Cache-only invariant: Kể cả khi cache rỗng, TUYỆT ĐỐI KHÔNG gọi LLM hoặc external provider
+            if (qualifiedNews.isEmpty()) {
                 return ResponseEntity.ok(List.of());
             }
 
-            List<MobileNewsBundleResponse> result = cachedNews.stream()
+            List<MobileNewsBundleResponse> result = qualifiedNews.stream()
                     .limit(limit)
                     .map(this::mapToMobileBundle)
                     .collect(Collectors.toList());
@@ -137,6 +162,7 @@ public class MobileSyncController {
         List<NewsAiCache> allCached = aiNewsService.getAllCachedNews();
         return allCached.stream()
                 .filter(item -> item.getId() != null && item.getId().equals(id))
+                .filter(this::isQualifiedForMobile)
                 .findFirst()
                 .map(item -> ResponseEntity.ok(mapToMobileBundle(item)))
                 .orElse(ResponseEntity.notFound().build());
@@ -146,7 +172,7 @@ public class MobileSyncController {
      * GET /api/mobile/news/analysis-only?symbol=BTCUSDT&limit=10
      *
      * Chỉ trả về danh sách AI_Analysis (không kèm News), phù hợp cho
-     * trường hợp bạn Mạnh chỉ muốn cập nhật bảng AI_Analysis trong Room DB.
+     * trường hợp chỉ muốn cập nhật bảng AI_Analysis trong Room DB.
      */
     @GetMapping("/analysis-only")
     @Operation(
@@ -168,6 +194,7 @@ public class MobileSyncController {
         List<NewsAiCache> cachedNews = aiNewsService.getAllCachedNews();
 
         List<MobileAiAnalysisDto> result = cachedNews.stream()
+                .filter(this::isQualifiedForMobile)
                 .filter(item -> symbol == null || symbol.isEmpty() ||
                         (item.getSymbol() != null && item.getSymbol().equalsIgnoreCase(symbol)))
                 .limit(limit)
@@ -175,6 +202,82 @@ public class MobileSyncController {
                 .collect(Collectors.toList());
 
         return ResponseEntity.ok(result);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // KIỂM ĐỊNH CHẤT LƯỢNG CHO MOBILE APP: FAIL-CLOSED TIẾNG VIỆT
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * Kiểm tra xem một bản ghi NewsAiCache có đủ điều kiện để hiển thị trên Mobile App không.
+     * Quy tắc:
+     * 1. Không nhận bài đang chờ dịch (RAW_PENDING).
+     * 2. Không nhận bài bị lỗi dịch (QWEN_ERROR, QWEN_FAILED).
+     * 3. Bắt buộc có tiêu đề tiếng Việt chuẩn có dấu (displayTitleVi).
+     * 4. Tiêu đề tiếng Việt phải vượt qua kiểm định NewsLocalizationQualityPolicy.
+     * 5. Danh sách điểm chính (bullets) và tóm tắt phải là tiếng Việt đạt chuẩn.
+     */
+    public boolean isQualifiedForMobile(NewsAiCache entity) {
+        if (entity == null) {
+            return false;
+        }
+
+        String reason = entity.getReason();
+        if ("RAW_PENDING".equalsIgnoreCase(reason)) {
+            return false;
+        }
+        if (reason != null && (reason.startsWith("QWEN_ERROR") || reason.startsWith("QWEN_FAILED"))) {
+            return false;
+        }
+
+        String displayTitleVi = entity.getDisplayTitleVi();
+        if (displayTitleVi == null || displayTitleVi.isBlank()) {
+            return false;
+        }
+
+        String origTitle = entity.getOriginalTitle();
+        if (origTitle != null && !origTitle.isBlank()) {
+            if (!NewsLocalizationQualityPolicy.isValidDisplayTitleVi(displayTitleVi, origTitle)) {
+                return false;
+            }
+        } else {
+            if (!NewsLocalizationQualityPolicy.hasVietnameseCharacteristics(displayTitleVi)
+                    || NewsSummaryQualityPolicy.isBoilerplate(displayTitleVi)) {
+                return false;
+            }
+        }
+
+        // Bắt buộc kiểm định tóm tắt tiếng Việt đạt chuẩn (fail-closed nếu thiếu hoặc là tiếng Anh)
+        String displaySummaryVi = entity.getDisplaySummaryVi();
+        if (displaySummaryVi == null || displaySummaryVi.isBlank()) {
+            return false;
+        }
+        String origSummary = entity.getOriginalSummary();
+        if (!NewsLocalizationQualityPolicy.isValidDisplaySummaryVi(displaySummaryVi, origSummary, displayTitleVi)) {
+            return false;
+        }
+
+        String bulletsToParse = (entity.getBulletPointsVi() != null && !entity.getBulletPointsVi().isBlank())
+                ? entity.getBulletPointsVi()
+                : entity.getSummaryPoints();
+        if (bulletsToParse != null && !bulletsToParse.isBlank()) {
+            List<String> rawBullets = parseBullets(bulletsToParse);
+            if (!rawBullets.isEmpty() && !NewsLocalizationQualityPolicy.isValidBullets(rawBullets, displayTitleVi)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private List<String> parseBullets(String bulletsJson) {
+        if (bulletsJson == null || bulletsJson.isBlank()) {
+            return Collections.emptyList();
+        }
+        try {
+            return objectMapper.readValue(bulletsJson, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of(bulletsJson.trim());
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -192,12 +295,7 @@ public class MobileSyncController {
 
     /**
      * Map: NEWS_AI_CACHE → Room Entity "News"
-     *
-     * Chuyển đổi:
-     *   - id (Long)           → newsId (String "NEWS_xxx")
-     *   - title (String)      → title (String) ✅ KHỚP
-     *   - articleUrl (String)  → url (String) ✅ ĐỔI TÊN
-     *   - publishedAt (LocalDateTime) → publishedAt (long, Unix epoch ms) ✅ ĐỔI KIỂU
+     * Invariant: effectiveTitle TUYỆT ĐỐI là tiếng Việt (displayTitleVi), KHÔNG fallback sang tiếng Anh.
      */
     private MobileNewsDto mapToMobileNews(NewsAiCache entity) {
         String newsId = "NEWS_" + entity.getId();
@@ -205,12 +303,9 @@ public class MobileSyncController {
                 ? entity.getPublishedAt().toInstant(ZoneOffset.UTC).toEpochMilli()
                 : System.currentTimeMillis();
 
-        // Ưu tiên displayTitleVi nếu có; nếu Qwen lỗi hoặc chưa dịch, dùng tiêu đề gốc (fail-closed)
         String effectiveTitle = (entity.getDisplayTitleVi() != null && !entity.getDisplayTitleVi().isBlank())
                 ? entity.getDisplayTitleVi().trim()
-                : ((entity.getOriginalTitle() != null && !entity.getOriginalTitle().isBlank())
-                    ? entity.getOriginalTitle().trim()
-                    : (entity.getTitle() != null ? entity.getTitle().trim() : ""));
+                : "";
 
         return new MobileNewsDto(
                 newsId,
@@ -222,13 +317,7 @@ public class MobileSyncController {
 
     /**
      * Map: NEWS_AI_CACHE → Room Entity "AI_Analysis"
-     *
-     * Chuyển đổi:
-     *   - id (Long)              → newsId (String "NEWS_xxx") ✅ FK MAPPING
-     *   - summaryPoints (CLOB)   → summary (String) ✅ ĐỔI TÊN
-     *   - sentiment (String)     → sentiment (String) ✅ KHỚP
-     *   - confidencePct (BigDecimal) → confidenceScore (int) ✅ ĐỔI KIỂU
-     *   - reason (CLOB)          → reason (String) ✅ KHỚP
+     * Invariant: effectiveSummary TUYỆT ĐỐI là tiếng Việt (displaySummaryVi), KHÔNG fallback sang tiếng Anh.
      */
     private MobileAiAnalysisDto mapToMobileAnalysis(NewsAiCache entity) {
         String newsId = "NEWS_" + entity.getId();
@@ -236,14 +325,9 @@ public class MobileSyncController {
                 ? entity.getConfidencePct().intValue()
                 : 80;
 
-        // Ưu tiên displaySummaryVi nếu có; nếu Qwen lỗi, dùng originalSummary bài gốc
         String effectiveSummary = (entity.getDisplaySummaryVi() != null && !entity.getDisplaySummaryVi().isBlank())
                 ? entity.getDisplaySummaryVi().trim()
-                : ((entity.getSummaryPoints() != null && !entity.getSummaryPoints().isBlank())
-                    ? entity.getSummaryPoints().trim()
-                    : ((entity.getOriginalSummary() != null && !entity.getOriginalSummary().isBlank())
-                        ? entity.getOriginalSummary().trim()
-                        : ""));
+                : "";
 
         return new MobileAiAnalysisDto(
                 newsId,

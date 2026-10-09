@@ -19,6 +19,23 @@ public class NewsLocalizationQualityPolicy {
     );
 
     public static boolean hasExcessiveEnglishTokens(String text) {
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        String lower = text.toLowerCase();
+        // Bắt các từ/cụm từ tiếng Anh chưa dịch phổ biến hoặc dịch sai lệch thuật ngữ
+        String[] untranslatedEnglishTokens = {
+                "locally listed", "listed locally", "russia", "russian",
+                "breaking news", "breaking:", "surges", "surging",
+                "plunges", "plunging", "inflows", "outflows",
+                "crypto exchange", "crypto exchanges",
+                "quỹ giao dịch trái phiếu"
+        };
+        for (String token : untranslatedEnglishTokens) {
+            if (lower.contains(token)) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -47,6 +64,9 @@ public class NewsLocalizationQualityPolicy {
         if (!hasVietnameseCharacteristics(trimmedDisplay)) {
             return false;
         }
+        if (hasExcessiveEnglishTokens(trimmedDisplay)) {
+            return false;
+        }
         if (originalTitle != null && !originalTitle.isBlank()) {
             String trimmedOrig = originalTitle.trim();
             if (trimmedDisplay.equalsIgnoreCase(trimmedOrig) && trimmedOrig.length() > 5) {
@@ -65,6 +85,9 @@ public class NewsLocalizationQualityPolicy {
             return false;
         }
         if (!hasVietnameseCharacteristics(trimmedSummary)) {
+            return false;
+        }
+        if (hasExcessiveEnglishTokens(trimmedSummary)) {
             return false;
         }
         if (originalSummary != null && !originalSummary.isBlank()) {
@@ -99,6 +122,7 @@ public class NewsLocalizationQualityPolicy {
             if (cleanB.isBlank()) return false;
             if (NewsSummaryQualityPolicy.isBoilerplate(cleanB)) return false;
             if (!hasVietnameseCharacteristics(cleanB)) return false;
+            if (hasExcessiveEnglishTokens(cleanB)) return false;
             if (title != null && cleanB.equalsIgnoreCase(title.trim())) return false;
         }
         return true;

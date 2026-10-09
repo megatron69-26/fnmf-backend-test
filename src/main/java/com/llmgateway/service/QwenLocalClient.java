@@ -67,14 +67,22 @@ public class QwenLocalClient {
         public int getConfidencePct() { return confidencePct; }
     }
 
+    private final QwenInferenceCoordinator coordinator;
+
     @org.springframework.beans.factory.annotation.Autowired
-    public QwenLocalClient(ObjectMapper objectMapper) {
-        this(objectMapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+    public QwenLocalClient(ObjectMapper objectMapper,
+                           @org.springframework.beans.factory.annotation.Autowired(required = false) QwenInferenceCoordinator coordinator) {
+        this(objectMapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), coordinator);
     }
 
     public QwenLocalClient(ObjectMapper objectMapper, HttpClient httpClient) {
+        this(objectMapper, httpClient, new QwenInferenceCoordinator());
+    }
+
+    public QwenLocalClient(ObjectMapper objectMapper, HttpClient httpClient, QwenInferenceCoordinator coordinator) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient;
+        this.coordinator = coordinator != null ? coordinator : new QwenInferenceCoordinator();
     }
 
     public void setQwenUrl(String url) {
@@ -86,21 +94,34 @@ public class QwenLocalClient {
             return Optional.empty();
         }
 
-        String safeSummary = rawSummary != null ? rawSummary.trim() : "";
-        String systemPrompt = "Bạn là chuyên gia dịch thuật và tóm tắt tin tức tài chính sang tiếng Việt.\n" +
-                "Bạn chỉ nhận được tiêu đề và phần mô tả tóm tắt (snippet) từ nguồn RSS, không phải toàn văn bài báo.\n" +
-                "Tuyệt đối không tuyên bố là đã dịch toàn bài báo. Giữ nguyên số liệu chính xác từ bài gốc, không bịa đặt số liệu mới.\n" +
-                "Tuyệt đối không đưa ra khuyến nghị mua bán hoặc lời khuyên đầu tư.\n" +
-                "Trả về định dạng JSON thuần không dùng markdown.";
+        try {
+            return coordinator.executeWithLock("NEWS_LOCAL_CLIENT", Duration.ofSeconds(qwenTimeoutSeconds), () -> {
+                return doTranslateAndSummarize(rawTitle, rawSummary);
+            });
+        } catch (Exception e) {
+            log.warn("Lỗi hoặc không lấy được khóa điều phối Qwen cho tin tức: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
 
-        String userPrompt = "Tiêu đề gốc: " + rawTitle + "\n" +
-                "Mô tả gốc: " + safeSummary + "\n\n" +
-                "Hãy dịch và tóm tắt theo cấu trúc JSON sau:\n" +
+    private Optional<QwenTranslationResult> doTranslateAndSummarize(String rawTitle, String rawSummary) {
+        String safeSummary = rawSummary != null ? rawSummary.trim() : "";
+        if (safeSummary.length() > 250) {
+            safeSummary = safeSummary.substring(0, 250).trim();
+        }
+        String systemPrompt = "Dịch tin tài chính sang tiếng Việt chuẩn và xuất JSON thuần.\n" +
+                "- Không để sót tiếng Anh: 'locally listed'->'niêm yết trong nước', 'Russia'->'Nga', 'surges'->'tăng vọt', 'inflows'->'dòng vốn vào', 'outflows'->'dòng vốn rút ra'.\n" +
+                "- 'ETF' dịch là 'quỹ ETF' hoặc 'quỹ hoán đổi danh mục', TUYỆT ĐỐI không dịch thành 'quỹ trái phiếu'.\n" +
+                "- Giữ nguyên số liệu bài gốc, không bịa đặt, không khuyên mua bán, không dùng markdown fences.";
+
+        String userPrompt = "Tiêu đề: " + rawTitle + "\n" +
+                "Mô tả: " + safeSummary + "\n" +
+                "Trả về duy nhất JSON:\n" +
                 "{\n" +
-                "  \"display_title_vi\": \"Tiêu đề bài viết bằng tiếng Việt chuẩn có dấu\",\n" +
-                "  \"display_summary_vi\": \"Đoạn tóm tắt tiếng Việt 1-2 câu từ mô tả trên\",\n" +
-                "  \"bullet_points_vi\": [\"Ý chính 1 bằng tiếng Việt\", \"Ý chính 2 bằng tiếng Việt\"],\n" +
-                "  \"sentiment\": \"BULLISH\" hoặc \"BEARISH\" hoặc \"NEUTRAL\",\n" +
+                "  \"display_title_vi\": \"Tiêu đề tiếng Việt có dấu\",\n" +
+                "  \"display_summary_vi\": \"Tóm tắt 1-2 câu tiếng Việt\",\n" +
+                "  \"bullet_points_vi\": [\"Ý chính 1 tiếng Việt\", \"Ý chính 2 tiếng Việt\"],\n" +
+                "  \"sentiment\": \"BULLISH\"|\"BEARISH\"|\"NEUTRAL\",\n" +
                 "  \"confidence_pct\": 85\n" +
                 "}";
 
@@ -108,7 +129,7 @@ public class QwenLocalClient {
             Map<String, Object> reqBody = new HashMap<>();
             reqBody.put("model", qwenModel);
             reqBody.put("temperature", 0.2);
-            reqBody.put("max_tokens", 512);
+            reqBody.put("max_tokens", 200);
 
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
@@ -137,10 +158,16 @@ public class QwenLocalClient {
                 return Optional.empty();
             }
 
-            String content = choices.get(0).path("message").path("content").asText();
+            JsonNode messageNode = choices.get(0).path("message");
+            String content = messageNode.path("content").asText(null);
+            // Invariant: reasoning_content là nội dung suy luận nội bộ, TUYỆT ĐỐI không coi là JSON đáp án
             if (content == null || content.isBlank()) {
+                log.warn("Qwen phản hồi nội dung content rỗng (không chấp nhận reasoning_content làm đáp án): messageNode={}", messageNode);
                 return Optional.empty();
             }
+
+            // Loại bỏ reasoning tag <think>...</think> nếu có
+            content = stripReasoning(content);
 
             // Dọn dẹp code fence ```json ... ``` nếu có
             content = stripCodeFences(content.trim());
@@ -206,6 +233,19 @@ public class QwenLocalClient {
         }
     }
 
+    private String stripReasoning(String text) {
+        if (text == null) return null;
+        String s = text.trim();
+        int thinkStart = s.indexOf("<think>");
+        int thinkEnd = s.indexOf("</think>");
+        if (thinkStart != -1 && thinkEnd != -1 && thinkEnd > thinkStart) {
+            s = s.substring(0, thinkStart) + s.substring(thinkEnd + 8);
+        } else if (thinkStart != -1 && thinkEnd == -1) {
+            s = s.substring(thinkStart + 7);
+        }
+        return s.trim();
+    }
+
     private String stripCodeFences(String text) {
         String s = text.trim();
         if (s.startsWith("```json")) {
@@ -217,5 +257,21 @@ public class QwenLocalClient {
             s = s.substring(0, s.length() - 3);
         }
         return s.trim();
+    }
+
+    public String getQwenModel() {
+        return qwenModel;
+    }
+
+    public void setQwenModel(String qwenModel) {
+        this.qwenModel = qwenModel;
+    }
+
+    public int getQwenTimeoutSeconds() {
+        return qwenTimeoutSeconds;
+    }
+
+    public void setQwenTimeoutSeconds(int qwenTimeoutSeconds) {
+        this.qwenTimeoutSeconds = qwenTimeoutSeconds;
     }
 }

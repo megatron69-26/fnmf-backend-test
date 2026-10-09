@@ -669,22 +669,21 @@ public class AiNewsService {
                 dto.setSummary(displaySummary);
                 dto.setAiSummary(sanitizedBullets);
                 dto.setBulletPointsVi(sanitizedBullets);
-            } else {
-                // Qwen lỗi hoặc chưa có bản dịch: Giữ nguyên bài gốc cho app đọc (fail-closed)
-                dto.setDisplayTitleVi(null);
-                dto.setDisplaySummaryVi(null);
-                dto.setTitle(cOrigTitle);
-                dto.setSummary(cOrigSummary);
-                dto.setAiSummary(sanitizedBullets != null && !sanitizedBullets.isEmpty() ? sanitizedBullets : Collections.emptyList());
-                dto.setBulletPointsVi(Collections.emptyList());
+                items.add(dto);
+                if (items.size() >= limit) break;
             }
-
-            items.add(dto);
-            if (items.size() >= limit) break;
+            // Không đưa bài tiếng Anh chưa qua kiểm định tiếng Việt lên feed
         }
 
         if (items.isEmpty()) {
-            return NewsSyncResult.empty("Chưa có bản tin mới");
+            // Kiểm tra xem có bài tiếng Việt cũ hơn đạt chuẩn không
+            List<NewsFeedItemDto> fallbackVi = getValidLocalizedCacheItems(symbol, limit);
+            if (!fallbackVi.isEmpty()) {
+                String fallbackDataAsOf = fallbackVi.get(0).getAnalyzedAt();
+                String fallbackLatestPub = fallbackVi.get(0).getTimePublished();
+                return NewsSyncResult.stale(fallbackVi, "Đang cập nhật", fallbackDataAsOf, fallbackLatestPub);
+            }
+            return NewsSyncResult.empty("Đang cập nhật");
         }
 
         String dataAsOf = items.get(0).getAnalyzedAt();

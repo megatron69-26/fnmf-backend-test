@@ -75,5 +75,19 @@ Hệ thống định tuyến dữ liệu cố định (Fixed Provider Sharding) 
 
 ## 4. Kiểm Thử & Xác Minh Độc Lập (v1.1.23)
 - **Targeted Unit Tests:** `FixedProviderShardingTest` đạt 17/17 PASS.
-- **Toàn Bộ Test Suite:** 234/234 test PASS (`mvn test`).
+- **Toàn Bộ Test Suite:** 334/334 test PASS (`mvn test`).
 - **Production Deployment:** Hoàn tất triển khai trên Railway (`SUCCESS`). Migration V10 đã áp dụng thành công trên PostgreSQL.
+
+---
+
+## 5. Trạng thái Thử nghiệm Qwen3.5-4B & Pipeline Tin tức (Môi trường Test Note 10+)
+
+- **Chu kỳ nạp tin:** Chuyển sang 2 giờ/lần, cấu hình linh hoạt qua `NEWS_WORKER_INTERVAL_MS`.
+- **Hàng đợi & Kích hoạt tức thì:** Tách biệt bước nạp RSS và bước suy luận Qwen. Bài mới lưu thành công được đưa vào hàng đợi xử lý ngay lập tức.
+- **Bộ điều phối Đơn chuyến (Shared Single-Flight):** `QwenInferenceCoordinator` điều phối dùng chung giữa News Worker và Forecast Service, ngăn ngừa xung đột tài nguyên cục bộ trên Note 10+. Request người dùng không bị phong tỏa vô tận.
+- **Kiểm định chất lượng Tiếng Việt (Fail-Closed):** Endpoint Mobile `/api/mobile/news/sync` kiểm định nghiêm ngặt, loại bỏ bài `RAW_PENDING`, lỗi dịch, hoặc sót từ tiếng Anh (`locally listed`, `Russia`, ETF dịch sai). App chỉ hiển thị nội dung tiếng Việt đạt chuẩn.
+- **Xử lý lỗi & Phục hồi sau Restart:** Lỗi hoặc timeout được lưu trạng thái, áp dụng retry backoff có giới hạn (5 phút -> 15 phút), không chặn các bài sau và tự động phục hồi hàng đợi khi backend khởi động lại.
+- **Trạng thái thực tế & Hạn chế còn lại trên Note 10+:**
+  - Mô hình `Qwen3.5-4B` đã chạy thử nghiệm thực tế với `llama-server`.
+  - Lượt suy luận Forecast 4B vẫn gặp hiện tượng timeout do tổng thời gian suy luận kéo dài; **chưa được nghiệm thu chạy thường trực**.
+  - Khi thiết bị hoạt động tải nặng liên tục, hiện tượng điều tiết nhiệt phần cứng (thermal throttling) làm giảm tốc độ sinh token. Dự án **chưa giải quyết thermal throttling** trên phần cứng Note 10+ và giữ nguyên cấu hình rollback Qwen2.5-1.5B cho phương án dự phòng.

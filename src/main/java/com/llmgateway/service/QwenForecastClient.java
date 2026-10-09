@@ -47,17 +47,28 @@ public class QwenForecastClient {
     @Value("${forecast.worker.qwen-model:qwen3.5-4b}")
     private String qwenModel = "qwen3.5-4b";
 
-    @Value("${forecast.worker.qwen-timeout-seconds:180}")
-    private int qwenTimeoutSeconds = 180;
+    @Value("${forecast.worker.qwen-timeout-seconds:360}")
+    private int qwenTimeoutSeconds = 360;
+
+    @Value("${forecast.worker.qwen-lock-wait-seconds:5}")
+    private int qwenLockWaitSeconds = 5;
+
+    private final QwenInferenceCoordinator coordinator;
 
     @Autowired
-    public QwenForecastClient(ObjectMapper objectMapper) {
-        this(objectMapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build());
+    public QwenForecastClient(ObjectMapper objectMapper,
+                              @Autowired(required = false) QwenInferenceCoordinator coordinator) {
+        this(objectMapper, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build(), coordinator);
     }
 
     public QwenForecastClient(ObjectMapper objectMapper, HttpClient httpClient) {
+        this(objectMapper, httpClient, new QwenInferenceCoordinator());
+    }
+
+    public QwenForecastClient(ObjectMapper objectMapper, HttpClient httpClient, QwenInferenceCoordinator coordinator) {
         this.objectMapper = objectMapper;
         this.httpClient = httpClient != null ? httpClient : HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+        this.coordinator = coordinator != null ? coordinator : new QwenInferenceCoordinator();
     }
 
     public void setQwenUrl(String url) {
@@ -68,7 +79,40 @@ public class QwenForecastClient {
         this.qwenModel = model;
     }
 
+    public void setQwenTimeoutSeconds(int timeoutSeconds) {
+        this.qwenTimeoutSeconds = timeoutSeconds;
+    }
+
+    public int getQwenTimeoutSeconds() {
+        return this.qwenTimeoutSeconds;
+    }
+
+    public void setQwenLockWaitSeconds(int lockWaitSeconds) {
+        this.qwenLockWaitSeconds = lockWaitSeconds;
+    }
+
+    public int getQwenLockWaitSeconds() {
+        return this.qwenLockWaitSeconds;
+    }
+
     public ForecastResponse requestMarketForecast(
+            List<MarketPriceDto> allPrices,
+            List<CandleDto> candles,
+            List<NewsAiCache> recentNews,
+            String timeframe) {
+        try {
+            return coordinator.executeWithLock("FORECAST_CLIENT", Duration.ofSeconds(qwenLockWaitSeconds), () -> {
+                return doRequestMarketForecast(allPrices, candles, recentNews, timeframe);
+            });
+        } catch (ForecastUnavailableException fue) {
+            throw fue;
+        } catch (Exception ex) {
+            log.warn("Lỗi hoặc không lấy được khóa điều phối Qwen cho dự báo (chờ tối đa {}s): {}", qwenLockWaitSeconds, ex.getMessage());
+            throw new ForecastUnavailableException("Chưa thể tạo nhận định lúc này. Vui lòng thử lại sau.", ex);
+        }
+    }
+
+    private ForecastResponse doRequestMarketForecast(
             List<MarketPriceDto> allPrices,
             List<CandleDto> candles,
             List<NewsAiCache> recentNews,
@@ -165,7 +209,7 @@ public class QwenForecastClient {
             Map<String, Object> reqBody = new HashMap<>();
             reqBody.put("model", qwenModel);
             reqBody.put("temperature", 0.2);
-            reqBody.put("max_tokens", 256);
+            reqBody.put("max_tokens", 180);
 
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
@@ -194,11 +238,15 @@ public class QwenForecastClient {
                 throw new ForecastUnavailableException("Chưa thể tạo nhận định lúc này. Vui lòng thử lại sau.");
             }
 
-            String content = choices.get(0).path("message").path("content").asText();
+            JsonNode messageNode = choices.get(0).path("message");
+            String content = messageNode.path("content").asText(null);
+            // Invariant: reasoning_content là nội dung suy luận nội bộ, TUYỆT ĐỐI không coi là JSON đáp án
             if (content == null || content.isBlank()) {
-                throw new ForecastUnavailableException("Chưa thể tạo nhận định lúc này. Vui lòng thử lại sau.");
+                log.warn("Qwen phản hồi nội dung content rỗng (không chấp nhận reasoning_content làm đáp án): messageNode={}", messageNode);
+                throw new ForecastUnavailableException("Chưa thể tạo nhận định lúc này: Qwen phản hồi nội dung rỗng.");
             }
 
+            content = stripReasoning(content);
             content = stripCodeFences(content.trim());
             JsonNode parsed = objectMapper.readTree(content);
 
@@ -268,6 +316,19 @@ public class QwenForecastClient {
             log.warn("Lỗi giao tiếp hoặc parse phản hồi từ Qwen: {}", ex.getMessage());
             throw new ForecastUnavailableException("Chưa thể tạo nhận định lúc này. Vui lòng thử lại sau.", ex);
         }
+    }
+
+    private String stripReasoning(String text) {
+        if (text == null) return null;
+        String s = text.trim();
+        int thinkStart = s.indexOf("<think>");
+        int thinkEnd = s.indexOf("</think>");
+        if (thinkStart != -1 && thinkEnd != -1 && thinkEnd > thinkStart) {
+            s = s.substring(0, thinkStart) + s.substring(thinkEnd + 8);
+        } else if (thinkStart != -1 && thinkEnd == -1) {
+            s = s.substring(thinkStart + 7);
+        }
+        return s.trim();
     }
 
     private String stripCodeFences(String content) {

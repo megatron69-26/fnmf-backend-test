@@ -289,10 +289,13 @@ public class NewsServiceAndMigrationTest {
         for (int i = 1; i <= 10; i++) {
             NewsAiCache item = new NewsAiCache();
             item.setId((long) i);
-            item.setTitle("Market Article " + i);
+            item.setTitle("Thị trường tài chính ngày " + i);
+            item.setDisplayTitleVi("Thị trường tài chính ngày " + i);
+            item.setDisplaySummaryVi("Tóm tắt diễn biến thị trường tài chính ngày " + i + " với nhiều chuyển biến tích cực.");
             item.setArticleUrl("https://example.com/market-" + i);
             item.setSymbol("MARKET");
-            item.setSummaryPoints("[\"Market Summary " + i + "\"]");
+            item.setSummaryPoints("[\"Điểm nhấn thị trường 1 ngày " + i + "\", \"Điểm nhấn thị trường 2 ngày " + i + "\"]");
+            item.setBulletPointsVi("[\"Điểm nhấn thị trường 1 ngày " + i + "\", \"Điểm nhấn thị trường 2 ngày " + i + "\"]");
             item.setSentiment("BULLISH");
             item.setConfidencePct(BigDecimal.valueOf(85));
             item.setPublishedAt(LocalDateTime.of(2026, 9, 8, 8, i));
