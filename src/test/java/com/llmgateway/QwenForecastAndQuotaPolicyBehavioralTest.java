@@ -299,4 +299,81 @@ public class QwenForecastAndQuotaPolicyBehavioralTest {
         assertEquals(3, status.getRemainingRefreshes());
         verify(quotaRepository, times(1)).saveAndFlush(quotaRow);
     }
+
+    @Test
+    @DisplayName("8. Bắt lỗi thực tế: Giá BTC 82.544 nhưng Kháng cự 68.000 (Kháng cự < Giá hiện tại) bị Policy từ chối tuyệt đối")
+    void testSupportAndResistance_RejectsWhenResistanceBelowCurrentPrice() {
+        ForecastResponse invalidForecast = new ForecastResponse(
+                "MARKET",
+                "Nhận định toàn thị trường",
+                new BigDecimal("82544.31"),
+                "BULLISH_UPTREND",
+                "24H_7D",
+                new BigDecimal("64000.00"), // Hỗ trợ
+                new BigDecimal("68000.00"), // Kháng cự vô lý: thấp hơn giá hiện tại 82544.31!
+                "HOLD",
+                75,
+                List.of("Dòng vốn vào thị trường tiếp tục duy trì ổn định", "Khối lượng giao dịch tăng trưởng vững chắc"),
+                "Chỉ báo kỹ thuật duy trì đà tăng trưởng",
+                "Yếu tố kinh tế vĩ mô hỗ trợ thị trường",
+                "QWEN",
+                30,
+                false,
+                LocalDateTime.now()
+        );
+
+        ForecastUnavailableException ex = assertThrows(ForecastUnavailableException.class, () ->
+                ForecastQualityPolicy.validateOrThrow(invalidForecast));
+
+        assertTrue(ex.getMessage().contains("Ngưỡng kháng cự") && ex.getMessage().contains("không thể thấp hơn giá thị trường hiện tại"));
+    }
+
+    @Test
+    @DisplayName("9. Hỗ trợ cao hơn giá hiện tại bị Policy từ chối tuyệt đối")
+    void testSupportAndResistance_RejectsWhenSupportAboveCurrentPrice() {
+        ForecastResponse invalidForecast = new ForecastResponse(
+                "MARKET",
+                "Nhận định toàn thị trường",
+                new BigDecimal("82544.31"),
+                "BULLISH_UPTREND",
+                "24H_7D",
+                new BigDecimal("85000.00"), // Hỗ trợ vô lý: cao hơn giá hiện tại 82544.31!
+                new BigDecimal("88000.00"),
+                "HOLD",
+                75,
+                List.of("Dòng vốn vào thị trường tiếp tục duy trì ổn định", "Khối lượng giao dịch tăng trưởng vững chắc"),
+                "Chỉ báo kỹ thuật duy trì đà tăng trưởng",
+                "Yếu tố kinh tế vĩ mô hỗ trợ thị trường",
+                "QWEN",
+                30,
+                false,
+                LocalDateTime.now()
+        );
+
+        ForecastUnavailableException ex = assertThrows(ForecastUnavailableException.class, () ->
+                ForecastQualityPolicy.validateOrThrow(invalidForecast));
+
+        assertTrue(ex.getMessage().contains("Ngưỡng hỗ trợ") && ex.getMessage().contains("không thể cao hơn giá thị trường hiện tại"));
+    }
+
+    @Test
+    @DisplayName("10. Qwen thiếu trường số liệu kỹ thuật: Fail-closed, không tự ý điền fallback")
+    void testQwenMissingNumericFields_FailClosed_NoFallback() throws Exception {
+        // Qwen trả JSON thiếu support_level
+        HttpResponse<String> mockResponse = mock(HttpResponse.class);
+        when(mockResponse.statusCode()).thenReturn(200);
+        when(mockResponse.body()).thenReturn("{\"choices\":[{\"message\":{\"content\":\"{\\\"trend_prediction\\\":\\\"BULLISH_UPTREND\\\",\\\"recommendation\\\":\\\"HOLD\\\",\\\"confidence_score\\\":75,\\\"key_drivers\\\":[\\\"Dòng vốn tăng trưởng\\\",\\\"Áp lực bán giảm\\\"],\\\"technical_outlook\\\":\\\"Xu hướng tăng\\\",\\\"fundamental_outlook\\\":\\\"Vĩ mô tích cực\\\"}\"}}]}");
+
+        when(mockHttpClient.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(mockResponse);
+
+        List<MarketPriceDto> prices = List.of(
+                new MarketPriceDto("BTCUSDT", "Bitcoin", new BigDecimal("82544.31"), BigDecimal.ZERO, false, "BINANCE")
+        );
+
+        ForecastUnavailableException ex = assertThrows(ForecastUnavailableException.class, () ->
+                qwenForecastClient.requestMarketForecast(prices, Collections.emptyList(), Collections.emptyList(), "24H_7D"));
+
+        assertTrue(ex.getMessage().contains("thiếu ngưỡng hỗ trợ") || ex.getMessage().contains("Chưa thể tạo nhận định lúc này"));
+    }
 }

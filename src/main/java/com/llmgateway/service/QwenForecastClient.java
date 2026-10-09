@@ -92,57 +92,77 @@ public class QwenForecastClient {
             throw new ForecastUnavailableException("Không có dữ liệu giá BTC thực tế để làm mốc tham chiếu nhận định");
         }
 
-        // 2. Chuẩn bị prompt cho Qwen
+        // 2. Chuẩn bị prompt súc tích cho Qwen
         String systemPrompt = "Bạn là chuyên gia phân tích thị trường tài chính tiếng Việt chuẩn.\n" +
-                "Nhiệm vụ: Phân tích xu hướng toàn thị trường dựa trên dữ liệu giá BTC, các tài sản Binance và tin tức thực tế được cung cấp.\n" +
-                "RÀNG BUỘC CHẤT LƯỢNG NGHIÊM NGẶT:\n" +
-                "1. Toàn bộ nội dung phân tích (key_drivers, technical_outlook, fundamental_outlook) PHẢI VIẾT BẰNG TIẾNG VIỆT THỰC CHẤT CÓ DẤU.\n" +
-                "2. KHÔNG ĐƯỢC ĐƯA RA KHUYẾN NGHỊ MUA/BÁN CHẮC CHẮN. Tuyệt đối không cam kết lợi nhuận hay khẳng định 100%. Khuyến nghị chỉ chọn trong ['HOLD', 'BUY', 'SELL'] mang tính tham khảo thận trọng (ưu tiên HOLD khi biến động mạnh).\n" +
-                "3. Xu hướng (trend_prediction) chỉ chọn trong ['BULLISH_UPTREND', 'BEARISH_DOWNTREND', 'SIDEWAYS_CONSOLIDATION'].\n" +
-                "4. Các mức hỗ trợ (support_level) và kháng cự (resistance_level) phải là số thực dương, support_level <= resistance_level, bám sát mức giá BTC hiện tại.\n" +
-                "5. Độ tin cậy (confidence_score) từ 0 đến 100.\n" +
-                "6. Danh sách luận điểm trọng yếu (key_drivers) gồm 2 đến 4 ý tiếng Việt cụ thể, rõ ràng.\n" +
-                "7. Nhận định kỹ thuật và vĩ mô dài ít nhất 15 ký tự tiếng Việt.\n" +
-                "8. Tuyệt đối không bịa đặt số liệu hay dùng từ ngữ placeholder.\n" +
-                "9. Trả về JSON thuần không dùng markdown fences.";
+                "Nhiệm vụ: Trả về duy nhất 1 JSON nhận định thị trường theo đúng dữ liệu giá thực tế.\n" +
+                "YÊU CẦU BẮT BUỘC:\n" +
+                "1. Tiếng Việt có dấu đầy đủ, nghiêm cấm từ ngữ placeholder.\n" +
+                "2. Không đưa khuyến nghị chắc chắn: recommendation chỉ chọn 'HOLD', 'BUY', 'SELL' (ưu tiên 'HOLD').\n" +
+                "3. trend_prediction chỉ chọn 'BULLISH_UPTREND', 'BEARISH_DOWNTREND', hoặc 'SIDEWAYS_CONSOLIDATION'.\n" +
+                "4. support_level <= giá BTC hiện tại <= resistance_level (support và resistance là số thực dương bám sát giá BTC hiện tại).\n" +
+                "5. confidence_score là số nguyên 0-100.\n" +
+                "6. Trả về đúng 1 JSON hợp lệ, không dùng markdown fences hay giải thích thêm.";
 
-        StringBuilder userPrompt = new StringBuilder();
-        userPrompt.append("Dữ liệu giá tham chiếu BTC: ").append(btcPrice).append(" USDT\n");
-        if (allPrices != null && !allPrices.isEmpty()) {
-            userPrompt.append("Giá các tài sản thị trường:\n");
-            for (MarketPriceDto p : allPrices) {
-                userPrompt.append("- ").append(p.getSymbol()).append(": ").append(p.getPrice())
-                        .append(" (24h: ").append(p.getChange24h()).append("%)\n");
-            }
-        }
-        if (recentNews != null && !recentNews.isEmpty()) {
-            userPrompt.append("Tin tức thị trường gần đây:\n");
-            int newsCount = 0;
-            for (NewsAiCache n : recentNews) {
-                if (newsCount >= 3) break;
-                if (n.getTitle() != null && !n.getTitle().isBlank()) {
-                    userPrompt.append("- ").append(n.getTitle()).append("\n");
-                    newsCount++;
+        BigDecimal lowestCandlePrice = null;
+        BigDecimal highestCandlePrice = null;
+        if (candles != null && !candles.isEmpty()) {
+            for (CandleDto c : candles) {
+                if (c.getLow() != null && c.getLow().compareTo(BigDecimal.ZERO) > 0) {
+                    if (lowestCandlePrice == null || c.getLow().compareTo(lowestCandlePrice) < 0) {
+                        lowestCandlePrice = c.getLow();
+                    }
+                }
+                if (c.getHigh() != null && c.getHigh().compareTo(BigDecimal.ZERO) > 0) {
+                    if (highestCandlePrice == null || c.getHigh().compareTo(highestCandlePrice) > 0) {
+                        highestCandlePrice = c.getHigh();
+                    }
                 }
             }
         }
-        userPrompt.append("\nHãy tạo nhận định thị trường theo đúng định dạng JSON sau:\n")
+
+        StringBuilder userPrompt = new StringBuilder();
+        userPrompt.append("Giá BTC hiện tại: ").append(btcPrice).append(" USDT\n");
+        if (lowestCandlePrice != null && highestCandlePrice != null) {
+            userPrompt.append("Biên độ nến 30 ngày: ").append(lowestCandlePrice).append(" - ").append(highestCandlePrice).append(" USDT\n");
+        }
+        if (allPrices != null && !allPrices.isEmpty()) {
+            userPrompt.append("Top tài sản: ");
+            int c = 0;
+            for (MarketPriceDto p : allPrices) {
+                if (c >= 3) break;
+                userPrompt.append(p.getSymbol()).append("=").append(p.getPrice()).append(" ");
+                c++;
+            }
+            userPrompt.append("\n");
+        }
+        if (recentNews != null && !recentNews.isEmpty()) {
+            for (NewsAiCache n : recentNews) {
+                String title = (n.getDisplayTitleVi() != null && !n.getDisplayTitleVi().isBlank())
+                        ? n.getDisplayTitleVi() : n.getTitle();
+                if (title != null && !title.isBlank()) {
+                    userPrompt.append("Tin tham khảo: ").append(title).append("\n");
+                    break;
+                }
+            }
+        }
+        userPrompt.append("YÊU CẦU: Mọi luận điểm (key_drivers) phải viết bằng TIẾNG VIỆT CÓ DẤU, tuyệt đối không chép lại tiếng Anh.\n");
+        userPrompt.append("Mẫu JSON trả về:\n")
                 .append("{\n")
                 .append("  \"trend_prediction\": \"BULLISH_UPTREND\" | \"BEARISH_DOWNTREND\" | \"SIDEWAYS_CONSOLIDATION\",\n")
                 .append("  \"recommendation\": \"HOLD\" | \"BUY\" | \"SELL\",\n")
-                .append("  \"confidence_score\": 75,\n")
-                .append("  \"support_level\": 64000.0,\n")
-                .append("  \"resistance_level\": 68000.0,\n")
-                .append("  \"key_drivers\": [\"Luận điểm 1 bằng tiếng Việt có dấu\", \"Luận điểm 2 bằng tiếng Việt có dấu\"],\n")
-                .append("  \"technical_outlook\": \"Nhận định kỹ thuật ngắn gọn bằng tiếng Việt có dấu\",\n")
-                .append("  \"fundamental_outlook\": \"Nhận định vĩ mô ngắn gọn bằng tiếng Việt có dấu\"\n")
+                .append("  \"confidence_score\": <số nguyên 0-100>,\n")
+                .append("  \"support_level\": <số thực <= ").append(btcPrice).append(">,\n")
+                .append("  \"resistance_level\": <số thực >= ").append(btcPrice).append(">,\n")
+                .append("  \"key_drivers\": [\"<luận điểm 1 tiếng Việt>\", \"<luận điểm 2 tiếng Việt>\"],\n")
+                .append("  \"technical_outlook\": \"<nhận định kỹ thuật 1-2 câu tiếng Việt>\",\n")
+                .append("  \"fundamental_outlook\": \"<nhận định vĩ mô 1-2 câu tiếng Việt>\"\n")
                 .append("}");
 
         try {
             Map<String, Object> reqBody = new HashMap<>();
             reqBody.put("model", qwenModel);
             reqBody.put("temperature", 0.2);
-            reqBody.put("max_tokens", 384);
+            reqBody.put("max_tokens", 256);
 
             List<Map<String, String>> messages = new ArrayList<>();
             messages.add(Map.of("role", "system", "content", systemPrompt));
@@ -154,7 +174,7 @@ public class QwenForecastClient {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(qwenUrl))
                     .header("Content-Type", "application/json")
-                    .timeout(Duration.ofSeconds(90))
+                    .timeout(Duration.ofSeconds(120))
                     .POST(HttpRequest.BodyPublishers.ofString(jsonPayload))
                     .build();
 
@@ -181,9 +201,21 @@ public class QwenForecastClient {
 
             String trend = parsed.path("trend_prediction").asText(null);
             String rec = parsed.path("recommendation").asText("HOLD").toUpperCase(Locale.ROOT);
-            int confidence = parsed.path("confidence_score").asInt(70);
-            BigDecimal support = parsed.has("support_level") ? BigDecimal.valueOf(parsed.path("support_level").asDouble()) : btcPrice.multiply(BigDecimal.valueOf(0.97));
-            BigDecimal resistance = parsed.has("resistance_level") ? BigDecimal.valueOf(parsed.path("resistance_level").asDouble()) : btcPrice.multiply(BigDecimal.valueOf(1.03));
+
+            // Kiểm tra bắt buộc có các trường số liệu, không tự điền fallback bừa bãi
+            if (!parsed.has("confidence_score") || !parsed.get("confidence_score").isNumber()) {
+                throw new ForecastUnavailableException("Qwen phản hồi thiếu điểm tin cậy (confidence_score) hợp lệ");
+            }
+            if (!parsed.has("support_level") || !parsed.get("support_level").isNumber()) {
+                throw new ForecastUnavailableException("Qwen phản hồi thiếu ngưỡng hỗ trợ (support_level) hợp lệ");
+            }
+            if (!parsed.has("resistance_level") || !parsed.get("resistance_level").isNumber()) {
+                throw new ForecastUnavailableException("Qwen phản hồi thiếu ngưỡng kháng cự (resistance_level) hợp lệ");
+            }
+
+            int confidence = parsed.path("confidence_score").asInt();
+            BigDecimal support = BigDecimal.valueOf(parsed.path("support_level").asDouble());
+            BigDecimal resistance = BigDecimal.valueOf(parsed.path("resistance_level").asDouble());
             String techOutlook = parsed.path("technical_outlook").asText(null);
             String fundOutlook = parsed.path("fundamental_outlook").asText(null);
 

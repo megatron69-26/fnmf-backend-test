@@ -154,7 +154,7 @@ public class ForecastQualityPolicy {
             throw new ForecastUnavailableException("Độ tin cậy dự báo nằm ngoài phạm vi 0-100: " + confidence);
         }
 
-        // 8. Ngưỡng hỗ trợ & kháng cự phải là số dương và Support <= Resistance
+        // 8. Ngưỡng hỗ trợ & kháng cự phải là số dương, hợp lệ kỹ thuật và đối chiếu với giá thị trường hiện tại
         BigDecimal support = forecast.getSupportLevel();
         BigDecimal resistance = forecast.getResistanceLevel();
         if (support == null || resistance == null || support.compareTo(BigDecimal.ZERO) <= 0 || resistance.compareTo(BigDecimal.ZERO) <= 0) {
@@ -162,6 +162,35 @@ public class ForecastQualityPolicy {
         }
         if (support.compareTo(resistance) > 0) {
             throw new ForecastUnavailableException("Ngưỡng hỗ trợ vượt quá ngưỡng kháng cự");
+        }
+
+        BigDecimal currentPrice = forecast.getCurrentPrice();
+        if (currentPrice != null && currentPrice.compareTo(BigDecimal.ZERO) > 0) {
+            // Ngưỡng kháng cự kỹ thuật hiện tại không thể thấp hơn giá thị trường hiện tại
+            if (resistance.compareTo(currentPrice) < 0) {
+                throw new ForecastUnavailableException(String.format(
+                        "Ngưỡng kháng cự (%s) không thể thấp hơn giá thị trường hiện tại (%s)",
+                        resistance, currentPrice));
+            }
+            // Ngưỡng hỗ trợ kỹ thuật hiện tại không thể cao hơn giá thị trường hiện tại
+            if (support.compareTo(currentPrice) > 0) {
+                throw new ForecastUnavailableException(String.format(
+                        "Ngưỡng hỗ trợ (%s) không thể cao hơn giá thị trường hiện tại (%s)",
+                        support, currentPrice));
+            }
+            // Kiểm tra biên độ: hỗ trợ và kháng cự không được lệch quá 50% so với giá hiện tại
+            BigDecimal maxAllowedResistance = currentPrice.multiply(BigDecimal.valueOf(1.50));
+            BigDecimal minAllowedSupport = currentPrice.multiply(BigDecimal.valueOf(0.50));
+            if (resistance.compareTo(maxAllowedResistance) > 0) {
+                throw new ForecastUnavailableException(String.format(
+                        "Ngưỡng kháng cự (%s) lệch quá 50%% so với giá hiện tại (%s)",
+                        resistance, currentPrice));
+            }
+            if (support.compareTo(minAllowedSupport) < 0) {
+                throw new ForecastUnavailableException(String.format(
+                        "Ngưỡng hỗ trợ (%s) lệch quá 50%% so với giá hiện tại (%s)",
+                        support, currentPrice));
+            }
         }
 
         // 9. Thời gian tạo không được null và không được ở tương lai xa
